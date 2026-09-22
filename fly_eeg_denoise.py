@@ -53,9 +53,10 @@ def load_centered(a, rng, eeg, eog, emg):
     n = min(len(eeg), len(eog), len(emg))
     idx = rng.permutation(n)
 
-    def mix(i, snr):
+    def mix(i, snr, j=None):
+        j = i if j is None else j                  # artifact record index (== i in the SPAR-EEG protocol)
         clean = eeg[i] / eeg[i][:, lo:hi].std(1, keepdims=True)
-        parts = {"eog": eog[i][:, lo:hi], "emg": emg[i][:, lo:hi]}
+        parts = {"eog": eog[j][:, lo:hi], "emg": emg[j][:, lo:hi]}
         if a.artifact == "both":
             art = parts["eog"] / parts["eog"].std(1, keepdims=True) + parts["emg"] / parts["emg"].std(1, keepdims=True)
         else:
@@ -68,9 +69,15 @@ def load_centered(a, rng, eeg, eog, emg):
 
     n_va = a.n_train // 5
     x, y, snr = {}, {}, {}
-    for name, sl in [("tr", idx[:a.n_train - n_va]), ("va", idx[a.n_train - n_va:a.n_train])]:
-        snr[name] = rng.uniform(-20, 5, size=len(sl))
-        x[name], y[name] = mix(sl, snr[name])
+    # --extra-train: also train on records AFTER the test block (test set unchanged); -1 = all remaining
+    extra = idx[a.n_train + a.n_test:] if a.extra_train < 0 else idx[a.n_train + a.n_test:a.n_train + a.n_test + a.extra_train]
+    for name, sl in [("tr", np.concatenate([idx[:a.n_train - n_va], extra])), ("va", idx[a.n_train - n_va:a.n_train])]:
+        # --aug K: each clean record K times with fresh SNR draws; repeats r >= 1 pair it with the artifact
+        # of another record from the SAME pool (never a test record), so artifact templates do not leak
+        ii = np.tile(sl, a.aug)
+        jj = np.concatenate([np.roll(sl, r * max(1, len(sl) // a.aug)) for r in range(a.aug)])
+        snr[name] = rng.uniform(-20, 5, size=len(ii))
+        x[name], y[name] = mix(ii, snr[name], jj)
     te = idx[a.n_train:a.n_train + a.n_test]
     snr["te"] = np.repeat(LEVELS, len(te)).astype(float)
     x["te"], y["te"] = (np.concatenate(v) for v in zip(*[mix(te, np.full(len(te), float(l))) for l in LEVELS]))
@@ -91,6 +98,8 @@ def load_data(a, rng):
     sets = {}
     for name, sl in [("tr", idx[:a.n_train - n_va]), ("va", idx[a.n_train - n_va:a.n_train]),
                      ("te", idx[a.n_train:a.n_train + a.n_test])]:
+        if name != "te" and a.aug > 1:                     # --aug also for the whole protocol: fresh artifact + SNR draws
+            sl = np.tile(sl, a.aug)
         snr = rng.uniform(-7, 2, size=len(sl))
         sets[name] = contaminate(eeg[sl], art[a.artifact], snr, rng)
     return {k: v[0] for k, v in sets.items()}, {k: v[1] for k, v in sets.items()}, None
@@ -356,6 +365,8 @@ def main():
                    help="whole: EEGdenoiseNet mixing over the full epoch, SNR U(-7, 2); centered: SPAR-EEG middle-third layout, test at 26 levels (n-test = records per level)")
     p.add_argument("--n-train", type=int, default=800)
     p.add_argument("--n-test", type=int, default=200)
+    p.add_argument("--extra-train", type=int, default=0, help="centered protocol: extra train records taken after the test block (-1 = all remaining)")
+    p.add_argument("--aug", type=int, default=1, help="centered protocol: SNR / artifact-pairing draws per clean train and val record")
     p.add_argument("--batch", type=int, default=40)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--subset", default="central", choices=["central", "all"])

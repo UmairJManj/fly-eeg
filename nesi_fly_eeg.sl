@@ -17,23 +17,29 @@ export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 ARTIFACT=${ARTIFACT:-eog}
 PROTOCOL=${PROTOCOL:-centered}          # centered = SPAR-EEG protocol; whole = EEGdenoiseNet protocol
-STATES=/nesi/nobackup/aut04653/Manj/Fly/states_${ARTIFACT}_${PROTOCOL}${SMOKE:+_smoke}
+AUG=${AUG:-1}                            # centered protocol: draws per clean train/val record
+XTR=${XTR:-0}                            # centered protocol: extra train records after the test block (-1 = all)
+STATES=/nesi/nobackup/aut04653/Manj/Fly/states_${ARTIFACT}_${PROTOCOL}${NTR:+_n$NTR}$([ "$AUG" -gt 1 ] && echo _aug$AUG || true)$([ "$XTR" != 0 ] && echo _xtr$XTR || true)${SMOKE:+_smoke}
 mkdir -p "$(dirname "$STATES")"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
 
 if [ -n "$SMOKE" ]; then
-    NTR=60; NTE=4; STEPS=200
+    NTR=${NTR:-60}; NTE=4; STEPS=200
 elif [ "$PROTOCOL" = centered ]; then
-    NTR=2400; NTE=150; STEPS=6000
+    NTR=${NTR:-2400}; NTE=150; STEPS=6000
 else
-    NTR=4000; NTE=500; STEPS=6000
+    NTR=${NTR:-4000}; NTE=500; STEPS=6000
 fi
 EXTRA=""
 [ "$PROTOCOL" = centered ] && EXTRA="--no-shuffle-control"
 
-echo "== $(date) artifact=$ARTIFACT protocol=$PROTOCOL n-train=$NTR n-test=$NTE smoke=${SMOKE:-0}"
+echo "== $(date) artifact=$ARTIFACT protocol=$PROTOCOL n-train=$NTR n-test=$NTE aug=$AUG xtr=$XTR smoke=${SMOKE:-0} states=$STATES"
 uv run --no-sync python ../fly-eeg/fly_eeg_denoise.py --protocol $PROTOCOL --artifact $ARTIFACT \
-    --n-train $NTR --n-test $NTE --batch 100 $EXTRA --save-states "$STATES"
+    --n-train $NTR --n-test $NTE --batch 100 --aug $AUG --extra-train $XTR $EXTRA --save-states "$STATES"
 echo "== $(date) readout"
-uv run --no-sync python ../fly-eeg/fly_eeg_readout.py "$STATES" --steps $STEPS
+if [ -n "$CONFIGS" ]; then      # readout suite v2 (TAG, CONFIGS, RD_EXTRA as in nesi_fly_readout.sl)
+    uv run --no-sync python ../fly-eeg/fly_eeg_readout_v2.py "$STATES" --tag "${TAG:-r1}" --configs "$CONFIGS" ${RD_EXTRA:-} ${SMOKE:+--seeds 1 --tcn-steps 300 --mlp-steps 300}
+else
+    uv run --no-sync python ../fly-eeg/fly_eeg_readout.py "$STATES" --steps $STEPS
+fi
 echo "== $(date) done"
