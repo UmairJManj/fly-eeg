@@ -88,7 +88,7 @@ def mlp_eval(name, S, x, y, shifts, dev, hidden=512, steps=6000, batch=1024, lr=
         loss.backward()
         opt.step()
         sched.step()
-        if step % 500 == 0:
+        if step % 500 == 0 or step == steps:
             v = np.sqrt(((predict("va") - x["va"]) ** 2).mean())
             if v < best[0]:
                 best = (v, {k: t_.clone() for k, t_ in model.state_dict().items()})
