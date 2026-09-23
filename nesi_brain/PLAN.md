@@ -3,8 +3,8 @@
 **Track A: the brain itself cleans (fixed random +-1 wire over 1,421 descending/motor neurons; leak, bias, synapse gains, JO input gains trained by BPTT).** EOG whole-epoch protocol, test set, SNR gain dB (references: untrained brain + fixed wire -3.2; untrained brain + fitted ridge +6.0; FIR filter +8.1; TCN decoder +17.1-17.6):
 - shuffled wiring, recipe lr 1e-3: **+7.66** (CC 0.83)
 - shuffled wiring, recipe D (lr 3e-3, bias lr 3e-4, warm-up, cosine): **+8.57** (CC 0.86) -> beats the linear filter, paired +0.48 dB [+0.32, +0.66]
-- REAL fly wiring, recipe D: **+7.3** (CC 0.81) at pass 23/30 and still climbing (plain); +7.2 (truncated-BPTT variant)
-- muscle (EMG), real wiring, D: +4.5 @ pass 21 (FIR +7.2); mixed (EOG+EMG), real wiring, D: **+4.54** final (FIR +7.3)
+- REAL fly wiring, recipe D: **+7.51 test** (CC 0.82, plain) and +7.31 (truncated-BPTT variant), both done; E_aug4 (4x data) +5.7 @ pass 5 and climbing faster
+- muscle (EMG), real wiring, D: **+4.70** final (FIR +7.2); mixed (EOG+EMG), real wiring, D: **+4.54** final (FIR +7.3)
 - Retired recipes: lr 1e-2 (diverges), bias lr 3e-3 (unstable), all-neuron wire (slower), old lr 1e-3 real wiring (+1.1, stuck)
 - Open: real wiring lags shuffled by ~1-2 dB at equal passes under the same recipe; round E (aug x4, wider leak range, gain weight-decay) queued/running.
 
@@ -65,3 +65,8 @@ Track C job 9277839 (make_dataset + run_compare: none/ICA+ICLabel/ASR/GEDAI at 8
 06:08 NO-BRAIN CONTROL COMPLETE (all artifacts, 3 seeds, whole aug12): TCN alone eog +17.56 / emg +11.58 / both +11.69 vs brain+TCN +16.99 / +11.43 / +11.63 -> reservoir adds ~0 (slightly negative) everywhere. Models: tcn_models/nobrain_{eog,emg,both}. Track B headline = TCN single-channel denoiser.
 07:23 DONE both_D_biaslow (real wiring): TEST +4.54 dB CC 0.618 (FIR +7.39, r0 ridge +6.22) -> brain-only below filter on mixed artifacts; eye D arms +7.3 @ pass 23; emg D +4.5 @ 21
 07:24 TRACK C COMPLETE (cmp/results/summary_v3_all_methods.md, plots cmp/results/plots/figC1/figC2): single-channel TCN (with or without brain, equal) beats ICA at 8 ch for EMG (12.8 vs 4.4) and mixed (10.7 vs 4.3) but loses on EOG (8.1 vs 14.5); ICA wins at >=32 ch everywhere (64ch: 14.6/14.4/13.6); ASR best at 8-16 ch EMG (13.7-13.9); GEDAI 5-12 dB but wrecks alpha (50-80% err); TCN alters alpha 6-11%, ICA/ASR <=1%. EOG single-channel gain here (~8 dB) << EEGdenoiseNet (+17.6) -> big domain shift. fly_brain_tcn rows = S1 all + S2 eog @0 dB only.
+09:10 DONE emg_D_biaslow (real wiring): TEST +4.70 dB CC 0.623 (FIR ~+7.2) -> brain-only below filter for muscle, like mixed
+10:30 retired eog_E_alpha_wide (+3.1 @ pass 6 vs D +4.2): wider leak range hurts; next E_wd
+10:56 DONE eog_D_biaslow_tbptt128 (REAL wiring): TEST +7.31 dB CC 0.808 RRMSE 0.590 (FIR +8.09; r0 +6.06); first real-wiring eye result
+11:09 DONE eog_D_biaslow (REAL wiring, plain D): TEST +7.51 dB CC 0.816 RRMSE 0.577 (FIR +8.09) -- best real-wiring result
+11:21 retired eog_E_wd (wd 1e-3: +3.5 @5, gains pinned); F_aug4_wd lowered to wd 1e-4

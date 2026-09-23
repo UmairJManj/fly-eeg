@@ -20,4 +20,9 @@ both_D_biaslow           --artifact both --protocol whole --readout random --n-t
 # round E (queued 20:10): D recipe + the strongest decoder lever (4x augmentation), and D + wider time-constant range
 eog_E_aug4               --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --aug 4 --passes 15 --patience 6 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
 eog_E_alpha_wide         --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --passes 30 --patience 8 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --alpha-min 0.005 --alpha-max 0.9 --no-ref-ridge
-eog_E_wd                 --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --passes 30 --patience 8 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --wd 1e-3 --no-ref-ridge
+eog_E_wd                 --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --passes 30 --patience 8 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --wd 1e-4 --no-ref-ridge
+# round F (queued 12:00): longer schedule for the eye recipe; augmentation for the harder artifacts; aug + weight decay
+eog_F_long60             --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --passes 60 --patience 12 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+emg_F_aug4               --artifact emg --protocol whole --readout random --n-train 4000 --n-test 500 --aug 4 --passes 15 --patience 6 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+both_F_aug4              --artifact both --protocol whole --readout random --n-train 4000 --n-test 500 --aug 4 --passes 15 --patience 6 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+eog_F_aug4_wd            --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --aug 4 --passes 15 --patience 6 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --wd 1e-4 --no-ref-ridge
