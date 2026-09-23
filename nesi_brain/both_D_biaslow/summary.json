@@ -1,0 +1,65 @@
+{
+ "noisy": {
+  "rrmse": 1.3894554376602173,
+  "cc": 0.5999583269758175,
+  "snr_gain": 0.0
+ },
+ "fir": {
+  "rrmse": 0.5873993635177612,
+  "cc": 0.8126681998916971,
+  "snr_gain": 7.291737079620361
+ },
+ "untrained": {
+  "rrmse": 1.988551139831543,
+  "cc": -0.05821275160584027,
+  "snr_gain": -3.1080141067504883
+ },
+ "brain": {
+  "rrmse": 0.7930136322975159,
+  "cc": 0.6176319100090701,
+  "snr_gain": 4.54254674911499
+ },
+ "args": {
+  "artifact": "both",
+  "protocol": "whole",
+  "n_train": 4000,
+  "n_test": 500,
+  "extra_train": 0,
+  "aug": 1,
+  "readout": "random",
+  "lam_min": 0.01,
+  "shuffle": false,
+  "train_edges": true,
+  "passes": 30,
+  "patience": 8,
+  "batch": 32,
+  "eval_batch": 100,
+  "lr": 0.003,
+  "lr_edge": 0.003,
+  "clip": 1.0,
+  "tbptt": 0,
+  "wire": "dn",
+  "wd": 0.0,
+  "cosine": true,
+  "lr_bias": 0.0003,
+  "warmup": 200,
+  "device": "cuda",
+  "rho": 0.9,
+  "alpha_min": 0.02,
+  "alpha_max": 0.5,
+  "gain": 1.0,
+  "bias": 0.02,
+  "h_max": 10.0,
+  "lag": 24,
+  "warm": 64,
+  "no_ref_ridge": true,
+  "no_fir": false,
+  "out": "/nesi/project/aut04653/Manj/Fly/brain/both_D_biaslow",
+  "seed": 0,
+  "save_states": null,
+  "batch_eval_backup": 32
+ },
+ "best_pass": 30,
+ "n_params": 2937265,
+ "elapsed_s": 17437.864359855652
+}

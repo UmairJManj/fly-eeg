@@ -141,6 +141,7 @@ def train_net(make, S, x, y, dev, steps, batch, lr, wd, seed, snr0, name, whole_
             print(f"  [{name} seed {seed}] step {step}: train RMSE {loss.sqrt().item():.3f}  val RMSE {v:.3f}  {time.time() - t0:.0f}s", flush=True)
     model.load_state_dict(best[1])
     xhat = predict("te")
+    train_net.last_model = model                      # exposed for --save-model
     return xhat, metrics(xhat, x["te"], y["te"], snr0), dict(val_rmse=best[0], params=sum(p.numel() for p in model.parameters()))
 
 
@@ -159,6 +160,7 @@ def main():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--wd", type=float, default=1e-4)
     p.add_argument("--gpu-cache-gb", type=float, default=20.0, help="train/val caches larger than this stay in host RAM")
+    p.add_argument("--save-model", type=Path, default=None, help="save every trained TCN (state + feature standardisation + config) here, for fly_apply.py")
     a = p.parse_args()
     dev = a.device
     S, x, y, snr0 = load(a.dir)
@@ -196,6 +198,11 @@ def main():
                     dil = tuple(2 ** i for i in range(int(o["d"])))
                     make = lambda: TCN(mu, sd, K, int(o["w"]), dil, drop=float(o["p"]))
                     xhat, m, info = train_net(make, S, x, y, dev, int(o["s"]), int(o["b"]), a.lr, a.wd, seed, snr0, cfg, True)
+                    if a.save_model:
+                        a.save_model.mkdir(parents=True, exist_ok=True)
+                        torch.save({"state": {k_: v.cpu() for k_, v in train_net.last_model.state_dict().items()}, "mu": mu.cpu(), "sd": sd.cpu(), "K": K,
+                                    "width": int(o["w"]), "dil": dil, "drop": float(o["p"]), "cfg": cfg, "seed": seed, "val_rmse": info["val_rmse"]},
+                                   a.save_model / f"{cfg.replace('+', '_')}_seed{seed}.pt")
                 ens.append(xhat)
                 infos.append({**summary(m), **info})
                 print(f"{cfg} seed {seed:34d} test {fmt(m)}", flush=True)
