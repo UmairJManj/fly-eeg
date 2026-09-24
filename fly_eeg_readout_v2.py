@@ -102,6 +102,57 @@ class TCN(nn.Module):
         return self.head(h).squeeze(1)
 
 
+class FCNN(nn.Module):
+    """EEGdenoiseNet-style fully-connected denoiser: flatten -> 3 x Dense(T) ReLU + dropout -> T."""
+    def __init__(self, mu, sd, K, T=512, drop=0.3):
+        super().__init__(); self.std = Std(mu, sd); self.T, self.K = T, K
+        self.net = nn.Sequential(nn.Flatten(), nn.Linear(T * K, T), nn.ReLU(), nn.Dropout(drop), nn.Linear(T, T), nn.ReLU(), nn.Dropout(drop),
+                                 nn.Linear(T, T), nn.ReLU(), nn.Dropout(drop), nn.Linear(T, T))
+    def forward(self, X): return self.net(self.std(X))
+
+
+class SimpleCNN(nn.Module):
+    """EEGdenoiseNet-style simple CNN: 4 x Conv1d(64, k=3) ReLU, flatten -> Dense(T)."""
+    def __init__(self, mu, sd, K, T=512):
+        super().__init__(); self.std = Std(mu, sd)
+        self.conv = nn.Sequential(nn.Conv1d(K, 64, 3, padding=1), nn.ReLU(), nn.Conv1d(64, 64, 3, padding=1), nn.ReLU(),
+                                  nn.Conv1d(64, 64, 3, padding=1), nn.ReLU(), nn.Conv1d(64, 64, 3, padding=1), nn.ReLU())
+        self.head = nn.Sequential(nn.Flatten(), nn.Linear(64 * T, T))
+    def forward(self, X): return self.head(self.conv(self.std(X).transpose(1, 2)))
+
+
+class ComplexCNN(nn.Module):
+    """EEGdenoiseNet-style complex CNN: stride-2 conv stages 32-64-128-256 (2 convs each, BN, ReLU), flatten -> Dense(T)."""
+    def __init__(self, mu, sd, K, T=512):
+        super().__init__(); self.std = Std(mu, sd); layers, c_in = [], K
+        for c in (32, 64, 128, 256):
+            layers += [nn.Conv1d(c_in, c, 5, padding=2), nn.BatchNorm1d(c), nn.ReLU(), nn.Conv1d(c, c, 5, padding=2, stride=2), nn.BatchNorm1d(c), nn.ReLU()]; c_in = c
+        self.conv = nn.Sequential(*layers); self.head = nn.Sequential(nn.Flatten(), nn.Dropout(0.3), nn.Linear(256 * (T // 16), T))
+    def forward(self, X): return self.head(self.conv(self.std(X).transpose(1, 2)))
+
+
+class RNNDenoiser(nn.Module):
+    """EEGdenoiseNet-style RNN: bidirectional LSTM(64) over samples -> linear per sample."""
+    def __init__(self, mu, sd, K, hidden=64):
+        super().__init__(); self.std = Std(mu, sd); self.rnn = nn.LSTM(K, hidden, batch_first=True, bidirectional=True); self.head = nn.Linear(2 * hidden, 1)
+    def forward(self, X): return self.head(self.rnn(self.std(X))[0]).squeeze(-1)
+
+
+class XfmrDenoiser(nn.Module):
+    """EEGDnet / DenoiseFormer-style transformer: 16-sample patches -> d=128, 4 encoder layers, 4 heads -> unpatch."""
+    def __init__(self, mu, sd, K, T=512, patch=16, d=128, layers=4, heads=4, drop=0.1):
+        super().__init__(); self.std = Std(mu, sd); self.patch, self.T = patch, T
+        self.emb = nn.Linear(patch * K, d); self.pos = nn.Parameter(torch.zeros(1, T // patch, d))
+        enc = nn.TransformerEncoderLayer(d, heads, 4 * d, drop, batch_first=True, norm_first=True)
+        self.enc = nn.TransformerEncoder(enc, layers); self.head = nn.Linear(d, patch)
+    def forward(self, X):
+        B, T, K = X.shape; Z = self.std(X).reshape(B, T // self.patch, self.patch * K)
+        return self.head(self.enc(self.emb(Z) + self.pos)).reshape(B, T)
+
+
+BASELINES = {"fcnn": FCNN, "scnn": SimpleCNN, "ccnn": ComplexCNN, "rnn": RNNDenoiser, "xfmr": XfmrDenoiser}
+
+
 def train_net(make, S, x, y, dev, steps, batch, lr, wd, seed, snr0, name, whole_epochs):
     torch.manual_seed(seed)
     g = torch.Generator().manual_seed(seed)
@@ -187,7 +238,14 @@ def main():
         else:
             ens, infos = [], []
             for seed in range(a.seeds):
-                if cfg.startswith("mlp"):
+                if cfg.split("+")[0] in BASELINES:      # published single-channel architectures (EEGdenoiseNet / EEGDnet style)
+                    o = {"s": a.tcn_steps, "b": a.tcn_batch}
+                    for tok in cfg.split("+")[1:]:
+                        o[tok[0]] = type(o[tok[0]])(tok[1:])
+                    cls = BASELINES[cfg.split("+")[0]]
+                    make = lambda: cls(mu, sd, K)
+                    xhat, m, info = train_net(make, S, x, y, dev, int(o["s"]), int(o["b"]), a.lr, a.wd, seed, snr0, cfg, True)
+                elif cfg.startswith("mlp"):
                     sh = SH[int(cfg[3:])]
                     make = lambda: MLP(mu, sd, K * len(sh), a.mlp_hidden, sh)
                     xhat, m, info = train_net(make, S, x, y, dev, a.mlp_steps, 1024, a.lr, a.wd, seed, snr0, cfg, False)

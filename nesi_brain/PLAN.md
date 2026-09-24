@@ -10,6 +10,22 @@
 
 **Track B correction: the reservoir adds nothing to the decoder.** TCN alone on the raw signal: EOG +17.56 / EMG +11.58 / mixed +11.69 dB vs brain+TCN +16.99 / +11.43 / +11.63. The +17 dB headline is a TCN result. Only Track A is fly-specific.
 
+**Track B: single-channel SOTA table (EEGdenoiseNet whole protocol, SNR U(-7,2), aug x12 training, 3 seeds; test SNR gain dB, eye / muscle / mixed):**
+| method | EOG | EMG | EOG+EMG |
+|---|---|---|---|
+| noisy input | 0 | 0 | 0 |
+| FIR 65-tap + ridge (linear) | 8.1 | 7.5 | 7.3 |
+| **fly brain, fixed wire (real wiring)** | **7.5** | **4.7** | **4.5** |
+| fly brain, fixed wire (shuffled wiring) | 8.6 | - | - |
+| FCNN (EEGdenoiseNet-style) | 9.6 | 9.1 | 9.5 |
+| LSTM (EEGdenoiseNet-style) | 11.8 | 8.1 | 8.2 |
+| simple CNN (EEGdenoiseNet-style) | 14.6 | **11.9** | **14.6** |
+| complex CNN (EEGdenoiseNet-style) | 15.4 | 11.0 | 11.3 |
+| transformer (EEGDnet-style) | 14.5 | 8.9 | 9.4 |
+| TCN d9 w384 (ours, no brain) | **17.6** | 11.6 | 11.7 |
+| fly reservoir + TCN | 17.0 | 11.4 | 11.6 |
+Reading: the deep learned decoders are far ahead of the brain-only model; among them our TCN is best on blinks, the simple CNN on muscle/mixed. The brain-only model's value is scientific (a fixed connectome learning the task), not SOTA performance. (jobs 9295965-67; baselines saved in tcn_models/baselines_<art>)
+
 **Track C: multichannel benchmark (EEGBCI 64 ch, real EOG/EMG injected, 4 subjects x 3 SNR), pooled SNR gain dB @ 8 / 64 channels; alpha-effect error in brackets:**
 | method | EOG | EMG | EOG+EMG |
 |---|---|---|---|
@@ -70,3 +86,7 @@ Track C job 9277839 (make_dataset + run_compare: none/ICA+ICLabel/ASR/GEDAI at 8
 10:56 DONE eog_D_biaslow_tbptt128 (REAL wiring): TEST +7.31 dB CC 0.808 RRMSE 0.590 (FIR +8.09; r0 +6.06); first real-wiring eye result
 11:09 DONE eog_D_biaslow (REAL wiring, plain D): TEST +7.51 dB CC 0.816 RRMSE 0.577 (FIR +8.09) -- best real-wiring result
 11:21 retired eog_E_wd (wd 1e-3: +3.5 @5, gains pinned); F_aug4_wd lowered to wd 1e-4
+12:27 L4 lanes now skip --aug arms (nesi_fly_lanes_v2.sl); lane target 4; recycled L4 lane that had emg_F_aug4 (2.1 h/pass)
+12:28 queued eog_D_seed1/2; submitted A100 lane 9294086 + H100 lane 9294087 for the aug arms
+13:30 SOTA comparison: baselines jobs 9295965-67 (fcnn/scnn/ccnn/rnn/xfmr on raw, 3 seeds x 20k, eog/emg/both); brain-only on SPAR-EEG centered protocol queued (eog/emg/both_D_centered, region dSNR added to fly_eeg_brain.py)
+13:32 user: do NOT compare with SPAR-EEG; centered arms blocked. SOTA comparators = fcnn/scnn/ccnn/rnn/xfmr (EEGdenoiseNet/EEGDnet-style), TCN, ICA+ICLabel/ASR/GEDAI

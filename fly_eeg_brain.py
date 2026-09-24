@@ -95,7 +95,7 @@ def set_fixed_readout(bd, x, y, a, rng):
     K = len(bd.dn_idx)
     xhat0 = np.concatenate([r.predict(bd.states(y["te"][b:b + a.eval_batch], bd.dn_idx).reshape(-1, K)).reshape(-1, y["te"].shape[1]).float().cpu().numpy()
                             for b in range(0, len(y["te"]), a.eval_batch)])
-    m0 = metrics(xhat0, x["te"], y["te"]); print(f"{'untrained brain + ridge (r0)':30s} test {fmt(m0)}   (lambda {r.lam})", flush=True)
+    m0 = metrics(xhat0, x["te"], y["te"], a.snr0); print(f"{'untrained brain + ridge (r0)':30s} test {fmt(m0)}   (lambda {r.lam})", flush=True)
     r.fit(lams=tuple(l for l in (1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1) if l >= a.lam_min))   # robust head to freeze
     bd.w_out.copy_((r.w / r.sd).float()); bd.b_out.fill_(float(r.ybar - (r.mu / r.sd) @ r.w))
     print(f"frozen ridge0 head: lambda {r.lam}, |w| max {bd.w_out.abs().max().item():.3g}", flush=True)
@@ -135,17 +135,17 @@ def main():
     p.add_argument("--no-fir", action="store_true")
     p.add_argument("--out", type=Path, required=True); p.add_argument("--seed", type=int, default=0)
     a = p.parse_args()
-    a.out.mkdir(parents=True, exist_ok=True)
+    a.out.mkdir(parents=True, exist_ok=True); a.snr0 = None
     torch.manual_seed(a.seed); rng = np.random.default_rng(a.seed)
     T0 = time.time()
 
-    x, y, _ = load_data(a, np.random.default_rng(0))
+    x, y, snr = load_data(a, np.random.default_rng(0)); snr0 = snr["te"] if snr else None; a.snr0 = snr0   # centered protocol: nominal input SNR per test epoch (SPAR-EEG score)
     print(f"EEGdenoiseNet {a.artifact} ({a.protocol}): train {len(x['tr'])} val {len(x['va'])} test {len(x['te'])} epochs of {x['tr'].shape[1]} samples", flush=True)
-    res, xh = {"noisy": metrics(y["te"], x["te"], y["te"])}, {}
+    res, xh = {"noisy": metrics(y["te"], x["te"], y["te"], snr0)}, {}
     print(f"{'noisy input':30s} test {fmt(res['noisy'])}", flush=True)
     if not a.no_fir:
         a.save_states, a.batch_eval_backup = None, a.batch; a.batch = a.eval_batch
-        xh["fir"], res["fir"], _ = evaluate("linear FIR (65 taps, no brain)", lambda yb: fir_features(yb, a.device), x, y, a)
+        xh["fir"], res["fir"], _ = evaluate("linear FIR (65 taps, no brain)", lambda yb: fir_features(yb, a.device), x, y, a, snr0)
         a.batch = a.batch_eval_backup
 
     conn = load_malecns(NFLY_DATA)
@@ -171,8 +171,8 @@ def main():
         with torch.no_grad():
             xh["r0"] = np.concatenate([r.predict(bd.states(y["te"][b:b + a.eval_batch], dn_idx).reshape(-1, K)).reshape(-1, y["te"].shape[1]).float().cpu().numpy()
                                        for b in range(0, len(y["te"]), a.eval_batch)])
-        res["r0"] = metrics(xh["r0"], x["te"], y["te"]); print(f"{'untrained brain + ridge (r0)':30s} test {fmt(res['r0'])}   (lambda {r.lam})", flush=True)
-    xh["untrained"] = predict(bd, y["te"], a.eval_batch); res["untrained"] = metrics(xh["untrained"], x["te"], y["te"])
+        res["r0"] = metrics(xh["r0"], x["te"], y["te"], snr0); print(f"{'untrained brain + ridge (r0)':30s} test {fmt(res['r0'])}   (lambda {r.lam})", flush=True)
+    xh["untrained"] = predict(bd, y["te"], a.eval_batch); res["untrained"] = metrics(xh["untrained"], x["te"], y["te"], snr0)
     print(f"{'untrained brain + fixed readout':30s} test {fmt(res['untrained'])}   ({time.time() - T0:.0f}s)", flush=True)
 
     # ---- train the brain ----
@@ -239,12 +239,15 @@ def main():
         if ps - best["pass"] >= a.patience: print("early stop", flush=True); break
 
     if best["state"] is not None: bd.load_state_dict(best["state"], strict=False)
-    xh["brain"] = predict(bd, y["te"], a.eval_batch); res["brain"] = metrics(xh["brain"], x["te"], y["te"])
+    xh["brain"] = predict(bd, y["te"], a.eval_batch); res["brain"] = metrics(xh["brain"], x["te"], y["te"], snr0)
     name = "TRAINED brain + fixed readout" + (" (shuffled)" if a.shuffle else "")
     print(f"{name:30s} test {fmt(res['brain'])}   (best pass {best['pass'] + 1}, {time.time() - T0:.0f}s)", flush=True)
     for other in ("untrained", "r0", "fir"):
         if other in res: paired(res, "brain", other)
     summary = {k: {m: float(v.mean()) for m, v in r.items()} for k, r in res.items()}
+    if snr0 is not None:
+        for k, r in res.items():
+            summary[k]["region_dsnr"] = float(np.mean([np.median(r["dsnr_region"][r["snr0"] == l]) for l in np.unique(r["snr0"])]))
     summary.update(args=vars(a) | {"out": str(a.out)}, best_pass=best["pass"] + 1, n_params=n_par, elapsed_s=time.time() - T0)
     json.dump(summary, open(a.out / "summary.json", "w"), indent=1, default=str)
     np.savez(a.out / "results.npz", clean=x["te"], noisy=y["te"], **{f"xhat_{k}": v for k, v in xh.items()},

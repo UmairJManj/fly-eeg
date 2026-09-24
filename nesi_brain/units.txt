@@ -26,3 +26,10 @@ eog_F_long60             --artifact eog --protocol whole --readout random --n-tr
 emg_F_aug4               --artifact emg --protocol whole --readout random --n-train 4000 --n-test 500 --aug 4 --passes 15 --patience 6 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
 both_F_aug4              --artifact both --protocol whole --readout random --n-train 4000 --n-test 500 --aug 4 --passes 15 --patience 6 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
 eog_F_aug4_wd            --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --aug 4 --passes 15 --patience 6 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --wd 1e-4 --no-ref-ridge
+# seed replicates of the best real-wiring eye recipe (for mean +- sd in the paper); non-aug so L4 lanes can take them
+eog_D_seed1              --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --passes 30 --patience 8 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge --seed 1
+eog_D_seed2              --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --passes 30 --patience 8 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge --seed 2
+# SPAR-EEG protocol (centered, region dSNR score) for the brain-only model -- direct comparison with SPAR-EEG 8.28 / 9.05 / 8.00
+eog_D_centered           --artifact eog --protocol centered --readout random --n-train 2400 --n-test 150 --passes 30 --patience 8 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+emg_D_centered           --artifact emg --protocol centered --readout random --n-train 2400 --n-test 150 --passes 30 --patience 8 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+both_D_centered          --artifact both --protocol centered --readout random --n-train 2400 --n-test 150 --passes 30 --patience 8 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge

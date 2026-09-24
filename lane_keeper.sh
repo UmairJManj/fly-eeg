@@ -9,6 +9,6 @@ for L in brain/*/train_*.log logs/fly-brain-9271509.log; do [ -f "$L" ] || conti
 for L in logs/fly-lane-*.log; do [ -f "$L" ] || continue; j=$(basename $L .log); grep -E "\[lane\] (===|done|FAILED)|taking over|requeueing" "$L" | while read -r line; do report "$j" "$line"; done; done
 [ -n "${NO_SUBMIT:-}" ] && exit 0
 n_norm=$(squeue -u $USER -h -n fly-lane -o "%q" | grep -vc debug); n_dbg=$(squeue -u $USER -h -o "%q" | grep -c debug)
-if [ "$n_dbg" -eq 0 ]; then j=$(sbatch --parsable --qos=debug -p milan --gpus-per-node=a100:1 --time=02:00:00 fly-eeg/nesi_fly_lanes.sl 2>&1) && echo "[keeper] submitted debug lane $j"; fi
-while [ "$n_norm" -lt "${NORMAL_TARGET:-3}" ]; do read PART TYPE < <(bash /nesi/project/aut04653/Manj/Foot/tools/pick_gpu.sh)
-  j=$(sbatch --parsable -p $PART --gpus-per-node=$TYPE:1 fly-eeg/nesi_fly_lanes.sl 2>&1) && echo "[keeper] submitted normal lane $j on $PART/$TYPE"; n_norm=$((n_norm+1)); done
+if [ "$n_dbg" -eq 0 ]; then j=$(sbatch --parsable --qos=debug -p milan --gpus-per-node=a100:1 --time=02:00:00 fly-eeg/nesi_fly_lanes_v2.sl 2>&1) && echo "[keeper] submitted debug lane $j"; fi
+while [ "$n_norm" -lt "${NORMAL_TARGET:-4}" ]; do read PART TYPE < <(bash /nesi/project/aut04653/Manj/Foot/tools/pick_gpu.sh)
+  j=$(sbatch --parsable -p $PART --gpus-per-node=$TYPE:1 fly-eeg/nesi_fly_lanes_v2.sl 2>&1) && echo "[keeper] submitted normal lane $j on $PART/$TYPE"; n_norm=$((n_norm+1)); done
