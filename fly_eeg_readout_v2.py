@@ -255,6 +255,10 @@ def main():
                     cls = BASELINES[cfg.split("+")[0]]
                     make = lambda: cls(mu, sd, K)
                     xhat, m, info = train_net(make, S, x, y, dev, int(o["s"]), int(o["b"]), a.lr, a.wd, seed, snr0, cfg, True)
+                    if a.save_model:                                   # baselines are saved too (K, mu, sd suffice to rebuild them)
+                        a.save_model.mkdir(parents=True, exist_ok=True)
+                        torch.save({"state": {k_: v.cpu() for k_, v in train_net.last_model.state_dict().items()}, "mu": mu.cpu(), "sd": sd.cpu(), "K": K,
+                                    "cfg": cfg, "seed": seed, "val_rmse": info["val_rmse"]}, a.save_model / f"{cfg.replace('+', '_')}_seed{seed}.pt")
                 elif cfg.startswith("mlp"):
                     sh = SH[int(cfg[3:])]
                     make = lambda: MLP(mu, sd, K * len(sh), a.mlp_hidden, sh)

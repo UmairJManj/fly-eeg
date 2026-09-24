@@ -31,6 +31,18 @@ Every round reports against 16.2 / 11.4 / 11.5. "Point 2" (reservoir + TCN) is o
 | fly reservoir + TCN | 17.0 | 11.4 | 11.6 |
 Reading: the deep learned decoders are far ahead of the brain-only model; among them our TCN is best on blinks, the simple CNN on muscle/mixed. The brain-only model's value is scientific (a fixed connectome learning the task), not SOTA performance. (jobs 9295965-67; baselines saved in tcn_models/baselines_<art>)
 
+**INDEPENDENT DATASET #2 (Klados SS2016 EEG/EOG, 13,620 test windows), SNR gain dB:**
+| method | trained on | SS2016 test |
+|---|---|---|
+| FIR fitted on SS2016 | SS2016 | 9.5 |
+| TCN d9 (3 seeds) | EEGdenoiseNet (zero-shot) | 9.0-9.2 (home score 17.6) |
+| **retuned fly brain (eog_D_biaslow)** | EEGdenoiseNet (zero-shot) | **7.50 (home score 7.51: no transfer loss)** |
+| complex CNN | SS2016 (in-domain) | 14.8 |
+| simple CNN | SS2016 (in-domain) | 11.7 |
+| EEGDiR | SS2016 (in-domain) | running |
+| retuned fly brain trained on SS2016 | SS2016 | queued (eog_SS2016_fast) |
+Reading: the deep model loses ~8.5 dB when moved to another recording set; the retuned brain loses nothing. In absolute terms the in-domain deep models still lead. (job 9299952; cmp/results/ss2016_zeroshot.json)
+
 **Track B, LEAK-FREE (disjoint artifact pools; the numbers to report), test SNR gain dB eye / muscle / mixed, 3 seeds:**
 | method | EOG | EMG | EOG+EMG |
 |---|---|---|---|
@@ -113,3 +125,7 @@ Track C job 9277839 (make_dataset + run_compare: none/ICA+ICLabel/ASR/GEDAI at 8
 16:44 user asked age of comparators: single-channel deep rows are 2021-2023 re-implementations; adding 2024-2026 (EEGDiR, LRR-UNet, BandRouteNet) + ART multichannel
 16:45 2024-2026 comparators: EEGDiR (2024, code: github woldier/EEGDiR, cloned to cmp/sota/EEGDiR) to port; LRR-UNet (2025, CNS Neurosci Ther, no public code) and BandRouteNet (2026 arXiv 2604.24428, no code found) -> re-implement from paper or mark as 'reported only'; note arXiv 2606.08594 (2026) argues EEGdenoiseNet is saturated + metric-utility gap -> cite
 16:46 EEGDiR (authors' code, 2024) ported into readout v2 as 'eegdir'; leak-free SOTA jobs (eegdir 60k + fcnn/rnn/xfmr 20k) submitted for eog/emg/both
+17:22 HEADLINE (user): 'We retuned the brain of a fly so that if we give EEG data as input we get cleaned EEG as output.'
+17:27 USER FRAMING: compare the retuned fly brain vs recent DL EEG cleaners (not our TCN), validate on independent datasets. fly_brain_apply.py written; brain-apply job 9299930 (eog/emg/both D brains on EEGBCI S1-2 @0 dB) -> 'retuned_fly_brain' row in Track C. Next independent set: Klados SS2016 semi-simulated EEG/EOG (via EEGDiR HF dataset woldier/eeg_denoise_dataset)
+17:29 SS2016 (Klados, via EEGDiR HF; x=clean, y=contaminated, 53540 train / 13620 test 512-sample windows): cmp/ss2016_export.py, cmp/zeroshot_eval.py, job 9299952 (zero-shot saved models + retuned brains, then in-domain ccnn/scnn/eegdir); brain arm eog_SS2016_fast queued (fly_eeg_brain --data-dir)
+18:02 readout v2 now saves baseline models too (was TCN-only -> leakfree/cnn60k/sota dirs lack CNN/EEGDiR models); sotasave jobs chained (ccnn/scnn/eegdir leak-free, saved) for zero-shot on SS2016

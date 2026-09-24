@@ -114,6 +114,7 @@ def main():
     p.add_argument("--n-train", type=int, default=4000); p.add_argument("--n-test", type=int, default=500)
     p.add_argument("--extra-train", type=int, default=0); p.add_argument("--aug", type=int, default=1)
     p.add_argument("--artifact-split", default="shared", choices=["shared", "disjoint"])
+    p.add_argument("--data-dir", default=None, help="train/evaluate on an independent raw cache instead of EEGdenoiseNet (see cmp/ss2016_export.py)")
     p.add_argument("--readout", default="random", choices=["random", "ridge0"])
     p.add_argument("--lam-min", type=float, default=1e-2, help="ridge0: smallest lambda allowed for the frozen head")
     p.add_argument("--shuffle", action="store_true", help="train the shuffled-wiring control brain instead")
@@ -141,7 +142,13 @@ def main():
     torch.manual_seed(a.seed); rng = np.random.default_rng(a.seed)
     T0 = time.time()
 
-    x, y, snr = load_data(a, np.random.default_rng(0)); snr0 = snr["te"] if snr else None; a.snr0 = snr0   # centered protocol: nominal input SNR per test epoch (SPAR-EEG score)
+    if a.data_dir:                                                     # independent dataset in raw-cache format ({tr,va,te}_{clean,noisy}.npy)
+        x = {k: np.load(Path(a.data_dir) / f"{k}_clean.npy") for k in ("tr", "va", "te")}; y = {k: np.load(Path(a.data_dir) / f"{k}_noisy.npy") for k in x}; snr = None
+        if a.n_train: x["tr"], y["tr"] = x["tr"][: a.n_train], y["tr"][: a.n_train]
+        if a.n_test: x["te"], y["te"] = x["te"][: a.n_test], y["te"][: a.n_test]
+    else:
+        x, y, snr = load_data(a, np.random.default_rng(0))
+    snr0 = snr["te"] if snr else None; a.snr0 = snr0   # centered protocol: nominal input SNR per test epoch (SPAR-EEG score)
     print(f"EEGdenoiseNet {a.artifact} ({a.protocol}): train {len(x['tr'])} val {len(x['va'])} test {len(x['te'])} epochs of {x['tr'].shape[1]} samples", flush=True)
     res, xh = {"noisy": metrics(y["te"], x["te"], y["te"], snr0)}, {}
     print(f"{'noisy input':30s} test {fmt(res['noisy'])}", flush=True)
