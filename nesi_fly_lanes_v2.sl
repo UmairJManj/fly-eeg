@@ -15,7 +15,7 @@ set -uo pipefail
 ROOT=/nesi/project/aut04653/Manj/Fly; source $ROOT/env.sh; cd "$ROOT/nfly"; export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 RUN=$ROOT/brain; LOCKS=$RUN/.locks; DONE=$RUN/.done; FAIL=$RUN/.fail; UNITS_FILE=$RUN/units.txt; mkdir -p "$LOCKS" "$DONE" "$FAIL"
 GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
-case "$GPU" in *L4*) BATCH=16;; *) BATCH=32;; esac
+case "$GPU" in *L4*) BATCH=32;; *) BATCH=64;; esac      # bigger batches: fewer steps per pass (crop training keeps memory in check)
 T_START=$(date +%s); WALL=$(( ${LANE_HOURS:-11} * 3600 )); [ "${SLURM_JOB_QOS:-}" = "debug" ] && WALL=6300
 GUARD_PID=""; if [ "${SLURM_JOB_QOS:-}" = "debug" ]; then ( sleep 6480 && echo "[guard] requeueing before wall" && scontrol requeue "$SLURM_JOB_ID" ) & GUARD_PID=$!; fi
 for lock in "$LOCKS"/*; do [ -d "$lock" ] || continue; [ "$(cat "$lock/owner" 2>/dev/null)" = "$SLURM_JOB_ID" ] && rm -rf "$lock"; done
@@ -31,7 +31,7 @@ while :; do
   CLAIMED=""; ARGS=""
   while read -r tag args; do [ -z "$tag" ] && continue; case "$tag" in \#*) continue;; esac
     [ -n "${ONLY:-}" ] && [ "$tag" != "$ONLY" ] && continue
-    case "$GPU" in *L4*) case " $args " in *" --aug "*) continue;; esac;; esac    # aug arms (4x steps) are too slow for an L4
+    [ -z "${ALLOW_AUG:-}" ] && case "$GPU" in *L4*) case " $args " in *" --aug "*) continue;; esac;; esac    # aug arms are slow on an L4 unless forced
     if claim "$tag"; then CLAIMED=$tag; ARGS=$args; break; fi; done < "$UNITS_FILE"
   if [ -z "$CLAIMED" ]; then
     if [ $(( $(date +%s) - T_START )) -gt $(( WALL - 600 )) ]; then echo "[lane] no work and wall near; exiting"; break; fi

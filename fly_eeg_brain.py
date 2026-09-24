@@ -113,6 +113,7 @@ def main():
     p.add_argument("--protocol", default="whole", choices=["whole", "centered"])
     p.add_argument("--n-train", type=int, default=4000); p.add_argument("--n-test", type=int, default=500)
     p.add_argument("--extra-train", type=int, default=0); p.add_argument("--aug", type=int, default=1)
+    p.add_argument("--artifact-split", default="shared", choices=["shared", "disjoint"])
     p.add_argument("--readout", default="random", choices=["random", "ridge0"])
     p.add_argument("--lam-min", type=float, default=1e-2, help="ridge0: smallest lambda allowed for the frozen head")
     p.add_argument("--shuffle", action="store_true", help="train the shuffled-wiring control brain instead")
@@ -121,8 +122,9 @@ def main():
     p.add_argument("--batch", type=int, default=32); p.add_argument("--eval-batch", type=int, default=100)
     p.add_argument("--lr", type=float, default=1e-3, help="leak / bias / input gain"); p.add_argument("--lr-edge", type=float, default=1e-3)
     p.add_argument("--clip", type=float, default=1.0)
+    p.add_argument("--train-len", type=int, default=0, help="train on random crops of this many samples (0 = full epoch); eval always on full epochs")
     p.add_argument("--tbptt", type=int, default=0, help="truncated-BPTT chunk length in samples (0 = full 600-step unroll)")
-    p.add_argument("--wire", default="dn", choices=["dn", "all"], help="neurons under the fixed readout wire: descending/motor or all non-JO")
+    p.add_argument("--wire", default="dn", choices=["dn", "all", "fastdn"], help="neurons under the fixed readout wire: descending/motor, all non-JO, or the fastest-leak half of the DN/motor set")
     p.add_argument("--wd", type=float, default=0.0, help="weight decay on the synapse log-gains (pulls gains back to 1)")
     p.add_argument("--cosine", action="store_true", help="cosine learning-rate decay over all passes")
     p.add_argument("--lr-bias", type=float, default=None, help="separate learning rate for the neuron biases (default: --lr)")
@@ -158,9 +160,11 @@ def main():
     in_idx = torch.as_tensor(np.flatnonzero(is_jo))
     dn_idx = torch.as_tensor(np.flatnonzero(ne.super_class.isin(["descending_neuron"]).to_numpy() | (ne.flow == "efferent").to_numpy()))
     out_idx = dn_idx if a.wire == "dn" else torch.as_tensor(np.flatnonzero(~is_jo))
+    model = make_model(conn, a, a.device)
+    if a.wire == "fastdn":                                   # readout only from the fastest DN/motor neurons (short time constants -> sharper output)
+        al = model.alpha().detach().cpu()[dn_idx]; out_idx = dn_idx[torch.argsort(al, descending=True)[: len(dn_idx) // 2]]
     print(f"{conn.summary()}\ninput: {len(in_idx)} JO neurons; fixed readout wire over {len(out_idx)} neurons ({a.wire}); ridge reference on {len(dn_idx)} DN/motor neurons", flush=True)
 
-    model = make_model(conn, a, a.device)
     for q in model.parameters(): q.requires_grad_(False)
     bd = BrainDenoiser(model, in_idx, out_idx, a).to(a.device)
     bd.register_buffer("dn_idx", dn_idx.to(a.device))
@@ -215,8 +219,11 @@ def main():
     for ps in range(start, a.passes):
         bd.train(); perm, tot, t0, k = torch.randperm(n, generator=g).numpy(), 0.0, time.time(), 0
         for i0 in range(0, n, a.batch):
-            i = np.sort(perm[i0:i0 + a.batch])
-            pred = bd(y["tr"][i]); loss = ((pred - torch.as_tensor(x["tr"][i], device=a.device)) ** 2).mean()
+            i = np.sort(perm[i0:i0 + a.batch]); yb, xb = y["tr"][i], x["tr"][i]
+            if a.train_len and a.train_len < yb.shape[1]:            # random crop (same offset for the batch): ~T/train_len x faster per step
+                s0 = int(g.integers(0, yb.shape[1] - a.train_len + 1)) if hasattr(g, "integers") else int(torch.randint(0, yb.shape[1] - a.train_len + 1, (1,), generator=g))
+                yb, xb = yb[:, s0:s0 + a.train_len], xb[:, s0:s0 + a.train_len]
+            pred = bd(yb); loss = ((pred - torch.as_tensor(xb, device=a.device)) ** 2).mean()
             opt.zero_grad(set_to_none=True); loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(params, a.clip).item(); opt.step()
             if sched is not None: sched.step()

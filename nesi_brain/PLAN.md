@@ -1,3 +1,8 @@
+# TARGET (user, 2026-09-24 17:40): the fly brain with a FIXED wire must beat the published deep denoisers, not the filter.
+Leak-free bar (complex CNN, 3 seeds): EOG 16.2 / EMG 11.4 / mixed 11.5 dB. Brain today: 7.5 / 4.7 / 4.5. Levers in order:
+training budget (aug12, long, fast crops) -> output bandwidth (lag 8, fast readout neurons) -> 3-brain average -> curriculum.
+Every round reports against 16.2 / 11.4 / 11.5. "Point 2" (reservoir + TCN) is only the comparison table: the brain adds nothing there.
+
 # FINDINGS SO FAR (updated 2026-09-24 08:10) -- read this first
 
 **Track A: the brain itself cleans (fixed random +-1 wire over 1,421 descending/motor neurons; leak, bias, synapse gains, JO input gains trained by BPTT).** EOG whole-epoch protocol, test set, SNR gain dB (references: untrained brain + fixed wire -3.2; untrained brain + fitted ridge +6.0; FIR filter +8.1; TCN decoder +17.1-17.6):
@@ -25,6 +30,17 @@
 | TCN d9 w384 (ours, no brain) | **17.6** | 11.6 | 11.7 |
 | fly reservoir + TCN | 17.0 | 11.4 | 11.6 |
 Reading: the deep learned decoders are far ahead of the brain-only model; among them our TCN is best on blinks, the simple CNN on muscle/mixed. The brain-only model's value is scientific (a fixed connectome learning the task), not SOTA performance. (jobs 9295965-67; baselines saved in tcn_models/baselines_<art>)
+
+**Track B, LEAK-FREE (disjoint artifact pools; the numbers to report), test SNR gain dB eye / muscle / mixed, 3 seeds:**
+| method | EOG | EMG | EOG+EMG |
+|---|---|---|---|
+| FIR (linear) | ~8.1 | ~7.5 | ~7.3 |
+| fly brain, fixed wire (real wiring; shared-split runs so far) | 7.5-7.8 | 4.7 | 4.5 |
+| simple CNN (EEGdenoiseNet-style, 60k) | 14.6 | 8.4 | 8.2 |
+| complex CNN (EEGdenoiseNet-style, 60k) | 16.2 | 11.4 | 11.5 |
+| TCN d9 w384 60k (ours, no brain) | **17.6** | **11.5** | 11.1 |
+| EEGDiR (authors' code, 2024), FCNN, LSTM, transformer | running (jobs 9299607-9) | | |
+Shared-split numbers that were inflated by template memorisation: simple CNN EMG 12.7 -> 8.4, mixed 15.9 -> 8.2. TCN and complex CNN unchanged.
 
 **Track C: multichannel benchmark (EEGBCI 64 ch, real EOG/EMG injected, 4 subjects x 3 SNR), pooled SNR gain dB @ 8 / 64 channels; alpha-effect error in brackets:**
 | method | EOG | EMG | EOG+EMG |
@@ -90,3 +106,10 @@ Track C job 9277839 (make_dataset + run_compare: none/ICA+ICLabel/ASR/GEDAI at 8
 12:28 queued eog_D_seed1/2; submitted A100 lane 9294086 + H100 lane 9294087 for the aug arms
 13:30 SOTA comparison: baselines jobs 9295965-67 (fcnn/scnn/ccnn/rnn/xfmr on raw, 3 seeds x 20k, eog/emg/both); brain-only on SPAR-EEG centered protocol queued (eog/emg/both_D_centered, region dSNR added to fly_eeg_brain.py)
 13:32 user: do NOT compare with SPAR-EEG; centered arms blocked. SOTA comparators = fcnn/scnn/ccnn/rnn/xfmr (EEGdenoiseNet/EEGDnet-style), TCN, ICA+ICLabel/ASR/GEDAI
+14:44 cnn60k: scnn eog 14.3 / emg 12.7 / both 15.9; ccnn 16.0 / 11.4 / 11.7 (TCN 17.6 / 11.6 / 11.7). CAVEAT: whole protocol shares artifact templates across splits -> memorisation possible (big dense heads). Added --artifact-split disjoint; leak-free rerun of scnn/ccnn/TCN submitted (nesi_fly_leakfree.sl)
+14:51 SPEED-UP: --train-len 256 (1 s random crops), batch 64 on A100/H100 (32 on L4); retired eog_F_long60 (33 h on L4); round G aug12 fast arms queued; smoke_fast at top; tried a pro_6000 lane 9297413
+14:58 big GPUs all busy: resumed eog_E_aug4 (pass 11, +7.7) on a forced L4 lane 9297556 (ALLOW_AUG=1); seed1 lane cancelled (resumes later)
+15:58 LEAK CONFIRMED: disjoint artifact split -> scnn eog 14.6 / emg 8.4 / both 8.2 (shared: 14.3 / 12.7 / 15.9); ccnn 16.2 / 11.4 / 11.5 (unchanged). Memorising models were flattered on emg/both. TCN leak-free pending. Round H (brain-only, disjoint, fast) queued; ALL final numbers to be reported leak-free.
+16:44 user asked age of comparators: single-channel deep rows are 2021-2023 re-implementations; adding 2024-2026 (EEGDiR, LRR-UNet, BandRouteNet) + ART multichannel
+16:45 2024-2026 comparators: EEGDiR (2024, code: github woldier/EEGDiR, cloned to cmp/sota/EEGDiR) to port; LRR-UNet (2025, CNS Neurosci Ther, no public code) and BandRouteNet (2026 arXiv 2604.24428, no code found) -> re-implement from paper or mark as 'reported only'; note arXiv 2606.08594 (2026) argues EEGdenoiseNet is saturated + metric-utility gap -> cite
+16:46 EEGDiR (authors' code, 2024) ported into readout v2 as 'eegdir'; leak-free SOTA jobs (eegdir 60k + fcnn/rnn/xfmr 20k) submitted for eog/emg/both

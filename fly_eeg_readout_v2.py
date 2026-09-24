@@ -150,7 +150,17 @@ class XfmrDenoiser(nn.Module):
         return self.head(self.enc(self.emb(Z) + self.pos)).reshape(B, T)
 
 
-BASELINES = {"fcnn": FCNN, "scnn": SimpleCNN, "ccnn": ComplexCNN, "rnn": RNNDenoiser, "xfmr": XfmrDenoiser}
+class EEGDiRWrap(nn.Module):
+    """EEGDiR (Wang et al. 2024, Comput Biol Med) -- the AUTHORS' RetNet denoiser (cmp/sota/EEGDiR), their EOG/EMG config:
+    1 layer, hidden 512, ffn 1024, 8 heads, mini_seq 32, dropout 0.1. Input: the raw 512-sample window."""
+    def __init__(self, mu, sd, K, T=512):
+        super().__init__(); import sys as _s; _s.path.insert(0, "/nesi/project/aut04653/Manj/Fly/cmp/sota/EEGDiR")
+        from model.retnet.retnet import DiR
+        self.std = Std(mu, sd); self.net = DiR(layers=1, hidden_dim=512, ffn_size=1024, heads=8, seq_len=T, mini_seq=32, drop_out=0.1)
+    def forward(self, X): return self.net._inner_forward(self.std(X)[:, :, 0])
+
+
+BASELINES = {"fcnn": FCNN, "scnn": SimpleCNN, "ccnn": ComplexCNN, "rnn": RNNDenoiser, "xfmr": XfmrDenoiser, "eegdir": EEGDiRWrap}
 
 
 def train_net(make, S, x, y, dev, steps, batch, lr, wd, seed, snr0, name, whole_epochs):

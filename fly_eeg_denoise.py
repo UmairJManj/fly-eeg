@@ -96,12 +96,18 @@ def load_data(a, rng):
     idx = rng.permutation(len(eeg))
     n_va = a.n_train // 5
     sets = {}
+    pool = art[a.artifact]
+    if getattr(a, "artifact_split", "shared") == "disjoint":   # leak-free: artifact templates never shared between splits (70/10/20)
+        ai = rng.permutation(len(pool)); n1, n2 = int(0.7 * len(pool)), int(0.8 * len(pool))
+        pools = {"tr": pool[ai[:n1]], "va": pool[ai[n1:n2]], "te": pool[ai[n2:]]}
+    else:
+        pools = {"tr": pool, "va": pool, "te": pool}
     for name, sl in [("tr", idx[:a.n_train - n_va]), ("va", idx[a.n_train - n_va:a.n_train]),
                      ("te", idx[a.n_train:a.n_train + a.n_test])]:
         if name != "te" and a.aug > 1:                     # --aug also for the whole protocol: fresh artifact + SNR draws
             sl = np.tile(sl, a.aug)
         snr = rng.uniform(-7, 2, size=len(sl))
-        sets[name] = contaminate(eeg[sl], art[a.artifact], snr, rng)
+        sets[name] = contaminate(eeg[sl], pools[name], snr, rng)
     return {k: v[0] for k, v in sets.items()}, {k: v[1] for k, v in sets.items()}, None
 
 
@@ -388,6 +394,7 @@ def main():
     p.add_argument("--no-fir", action="store_true")
     p.add_argument("--save-states", type=Path, default=None, help="dump the fly readout features (fp16 memmaps) to this folder for readout experiments")
     p.add_argument("--no-shuffle-control", action="store_true")
+    p.add_argument("--artifact-split", default="shared", choices=["shared", "disjoint"], help="whole protocol: share artifact templates across splits (EEGdenoiseNet default) or keep them disjoint (leak-free)")
     a = p.parse_args()
     rng = np.random.default_rng(0)
 

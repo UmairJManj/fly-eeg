@@ -1,3 +1,4 @@
+smoke_fast                --artifact eog --protocol whole --readout random --n-train 64 --n-test 16 --passes 2 --train-len 256 --lr 3e-3 --lr-bias 3e-4 --warmup 20 --cosine --no-ref-ridge --no-fir --batch 8
 smoke_roundC              --artifact eog --protocol whole --readout random --wire all --n-train 64 --n-test 16 --passes 2 --tbptt 128 --lr 3e-3 --cosine --wd 1e-4 --no-ref-ridge --no-fir --batch 8
 # round A shuffled control, resumed from ckpt.pt (pass 10, +5.0 dB) by the new lanes
 eog_whole_random_shuffled --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --passes 30 --shuffle
@@ -33,3 +34,15 @@ eog_D_seed2              --artifact eog --protocol whole --readout random --n-tr
 eog_D_centered           --artifact eog --protocol centered --readout random --n-train 2400 --n-test 150 --passes 30 --patience 8 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
 emg_D_centered           --artifact emg --protocol centered --readout random --n-train 2400 --n-test 150 --passes 30 --patience 8 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
 both_D_centered          --artifact both --protocol centered --readout random --n-train 2400 --n-test 150 --passes 30 --patience 8 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+# round H: LEAK-FREE split (disjoint artifact pools) for the brain-only model, fast settings -- the numbers to report
+eog_H_aug4_disjoint      --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --aug 4 --artifact-split disjoint --passes 12 --patience 5 --train-len 256 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+emg_H_aug4_disjoint      --artifact emg --protocol whole --readout random --n-train 4000 --n-test 500 --aug 4 --artifact-split disjoint --passes 12 --patience 5 --train-len 256 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+both_H_aug4_disjoint     --artifact both --protocol whole --readout random --n-train 4000 --n-test 500 --aug 4 --artifact-split disjoint --passes 12 --patience 5 --train-len 256 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+# round I (user 17:40: target = published deep models, not the filter): output-bandwidth levers, leak-free, fast
+eog_I_lag8_disjoint      --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --aug 4 --artifact-split disjoint --passes 12 --patience 5 --train-len 256 --lag 8 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+eog_I_aug12_long         --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --aug 12 --artifact-split disjoint --passes 20 --patience 6 --train-len 256 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+eog_I_fastdn_disjoint    --artifact eog --protocol whole --readout random --wire fastdn --n-train 4000 --n-test 500 --aug 4 --artifact-split disjoint --passes 12 --patience 5 --train-len 256 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+# round G (shared split, aug12) -- lower priority than the leak-free H/I arms
+eog_G_aug12_fast         --artifact eog --protocol whole --readout random --n-train 4000 --n-test 500 --aug 12 --passes 8 --patience 4 --train-len 256 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+emg_G_aug12_fast         --artifact emg --protocol whole --readout random --n-train 4000 --n-test 500 --aug 12 --passes 8 --patience 4 --train-len 256 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
+both_G_aug12_fast        --artifact both --protocol whole --readout random --n-train 4000 --n-test 500 --aug 12 --passes 8 --patience 4 --train-len 256 --lr 3e-3 --lr-bias 3e-4 --lr-edge 3e-3 --warmup 200 --cosine --no-ref-ridge
