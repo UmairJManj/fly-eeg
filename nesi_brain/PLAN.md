@@ -1,5 +1,5 @@
 # TARGET (user, 2026-09-24 17:40): the fly brain with a FIXED wire must beat the published deep denoisers, not the filter.
-Leak-free bar (complex CNN, 3 seeds): EOG 16.2 / EMG 11.4 / mixed 11.5 dB. Brain today: 7.5 / 4.7 / 4.5. Levers in order:
+Leak-free bar (EEGDiR 2024, authors' code, 3 seeds): EOG 17.4 / EMG 13.1 / mixed 12.7 dB (complex CNN 16.2 / 11.4 / 11.5). Brain today: 7.5 / 4.7 / 4.5. Levers in order:
 training budget (aug12, long, fast crops) -> output bandwidth (lag 8, fast readout neurons) -> 3-brain average -> curriculum.
 Every round reports against 16.2 / 11.4 / 11.5. "Point 2" (reservoir + TCN) is only the comparison table: the brain adds nothing there.
 
@@ -51,7 +51,10 @@ Reading: the deep model loses ~8.5 dB when moved to another recording set; the r
 | simple CNN (EEGdenoiseNet-style, 60k) | 14.6 | 8.4 | 8.2 |
 | complex CNN (EEGdenoiseNet-style, 60k) | 16.2 | 11.4 | 11.5 |
 | TCN d9 w384 60k (ours, no brain) | **17.6** | **11.5** | 11.1 |
-| EEGDiR (authors' code, 2024), FCNN, LSTM, transformer | running (jobs 9299607-9) | | |
+| **EEGDiR (authors' code, 2024, 20k steps)** | **17.4** | **13.1** | **12.7** |
+| FCNN (leak-free, 20k) | 9.9 | 9.2 | 9.1 |
+| LSTM (leak-free, 20k) | 11.8 | 8.3 | 8.3 |
+| transformer, EEGDnet-style (leak-free, 20k) | 14.3 | 8.6 | 8.3 |
 Shared-split numbers that were inflated by template memorisation: simple CNN EMG 12.7 -> 8.4, mixed 15.9 -> 8.2. TCN and complex CNN unchanged.
 
 **Track C: multichannel benchmark (EEGBCI 64 ch, real EOG/EMG injected, 4 subjects x 3 SNR), pooled SNR gain dB @ 8 / 64 channels; alpha-effect error in brackets:**
@@ -129,3 +132,5 @@ Track C job 9277839 (make_dataset + run_compare: none/ICA+ICLabel/ASR/GEDAI at 8
 17:27 USER FRAMING: compare the retuned fly brain vs recent DL EEG cleaners (not our TCN), validate on independent datasets. fly_brain_apply.py written; brain-apply job 9299930 (eog/emg/both D brains on EEGBCI S1-2 @0 dB) -> 'retuned_fly_brain' row in Track C. Next independent set: Klados SS2016 semi-simulated EEG/EOG (via EEGDiR HF dataset woldier/eeg_denoise_dataset)
 17:29 SS2016 (Klados, via EEGDiR HF; x=clean, y=contaminated, 53540 train / 13620 test 512-sample windows): cmp/ss2016_export.py, cmp/zeroshot_eval.py, job 9299952 (zero-shot saved models + retuned brains, then in-domain ccnn/scnn/eegdir); brain arm eog_SS2016_fast queued (fly_eeg_brain --data-dir)
 18:02 readout v2 now saves baseline models too (was TCN-only -> leakfree/cnn60k/sota dirs lack CNN/EEGDiR models); sotasave jobs chained (ccnn/scnn/eegdir leak-free, saved) for zero-shot on SS2016
+19:02 brain-apply too slow for one job (~2 h/condition on L4) -> split: 9300920 (S1 emg/both), 9300921 (S2 all three); S1 eog already saved
+19:44 leak-free single-channel table COMPLETE (EEGDiR 17.4/13.1/12.7; ccnn 16.2/11.4/11.5; xfmr 14.3/8.6/8.3; scnn 14.6/8.4/8.2; LSTM 11.8/8.3/8.3; FCNN 9.9/9.2/9.1; FIR ~8.1/7.5/7.3; brain 7.9*/5.7*/6.7* running)
