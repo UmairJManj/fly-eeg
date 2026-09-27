@@ -31,7 +31,7 @@ while :; do
   CLAIMED=""; ARGS=""
   while read -r tag args; do [ -z "$tag" ] && continue; case "$tag" in \#*) continue;; esac
     [ -n "${ONLY:-}" ] && [ "$tag" != "$ONLY" ] && continue
-    [ -z "${ALLOW_AUG:-}" ] && case "$GPU" in *L4*) case " $args " in *" --aug "*) continue;; esac;; esac    # aug arms are slow on an L4 unless forced
+    [ -z "${ALLOW_AUG:-}" ] && case " $args " in *" --batch "*) false;; *) true;; esac && case "$GPU" in *L4*) case " $args " in *" --aug "*) case " $args " in *" --passes "[1-5]" "*) ;; *) continue;; esac;; esac;; esac    # L4 is 3x slower per step: only short screening aug arms (<=5 passes) unless forced
     if claim "$tag"; then CLAIMED=$tag; ARGS=$args; break; fi; done < "$UNITS_FILE"
   if [ -z "$CLAIMED" ]; then
     if [ $(( $(date +%s) - T_START )) -gt $(( WALL - 600 )) ]; then echo "[lane] no work and wall near; exiting"; break; fi

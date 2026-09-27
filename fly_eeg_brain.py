@@ -23,6 +23,51 @@ from fly_eeg_denoise import (load_data, metrics, fmt, paired, make_model, jo_dri
                              fir_features, CENTRAL, NFLY_DATA)
 from nfly.connectome import load_malecns, build_connectome
 from nfly.brain import InputDrive
+from nfly.brain.rnn import ConnectomeRNN
+
+
+class BrainPlus(ConnectomeRNN):
+    """Neuron-intrinsic tweaks on top of the connectome RNN (wiring and Dale signs untouched):
+      --syn    per-neuron synaptic filter: recurrent+sensory current is low-passed (rate gamma) before the
+               membrane leak -> second-order, band-pass/resonant neurons instead of a single leak
+      --adapt  per-neuron spike-frequency adaptation: a slow trace of the neuron's own activity (rate beta)
+               is subtracted with a learnable strength -> high-pass / derivative-like responses
+      --slope  per-neuron learnable input slope (gain of the transfer function)"""
+    def init_plus(self, a):
+        n, dev = self.n, self.w0.device; g = torch.Generator().manual_seed(2)
+        def logu(lo, hi):
+            v = torch.exp(torch.rand(n, generator=g) * (np.log(hi) - np.log(lo)) + np.log(lo)); return torch.log(v / (1 - v)).to(dev)
+        self.plus = dict(syn=a.syn, adapt=a.adapt, slope=a.slope)
+        if a.syn: self.syn_logit = torch.nn.Parameter(logu(0.1, 0.9))
+        if a.adapt:
+            self.adapt_logit = torch.nn.Parameter(logu(0.005, 0.05))
+            self.adapt_log_g = torch.nn.Parameter(torch.full((n,), float(np.log(a.adapt_g)), device=dev))
+        if a.slope: self.log_slope = torch.nn.Parameter(torch.zeros(n, device=dev))
+
+    def plus_params(self):
+        return [getattr(self, k) for k in ("syn_logit", "adapt_logit", "adapt_log_g", "log_slope") if hasattr(self, k)]
+
+    def forward(self, drive=None, steps=None, batch=1, h0=None, record=None):
+        assert h0 is None, "BrainPlus: truncated BPTT not supported"
+        steps, batch = drive.steps, drive.batch; dev = self.w0.device; P = self.plus
+        h = torch.zeros(batch, self.n, device=dev); s = torch.zeros_like(h) if P["syn"] else None; q = torch.zeros_like(h) if P["adapt"] else None
+        W = self.weights(); gam = torch.sigmoid(self.syn_logit) if P["syn"] else None
+        bet = torch.sigmoid(self.adapt_logit) if P["adapt"] else None; ga = self.adapt_log_g.exp() if P["adapt"] else None
+        nu = self.log_slope.exp() if P["slope"] else None; idx = drive.idx.to(dev)
+        hist = [h if record is None else h[:, record]]
+        for t in range(steps):
+            u = torch.zeros(batch, self.n, device=dev); u[:, idx] = drive.drive[:, t].to(dev)
+            r = self.recurrent_input(h, W.w) + u
+            if s is not None: s = (1 - gam) * s + gam * r; r = s
+            x = r + self.bias
+            if nu is not None: x = x * nu
+            if q is not None: x = x - ga * q
+            x = self.act(x)
+            if self.h_max is not None: x = x.clamp(max=self.h_max)
+            h = (1 - W.alpha) * h + W.alpha * x
+            if q is not None: q = (1 - bet) * q + bet * h
+            hist.append(h if record is None else h[:, record])
+        return torch.stack(hist, dim=1)
 
 
 class BrainDenoiser(torch.nn.Module):
@@ -43,7 +88,16 @@ class BrainDenoiser(torch.nn.Module):
         a, T = self.a, y.shape[1]
         idx = self.out_idx if idx is None else idx
         yb = torch.as_tensor(np.pad(y, ((0, 0), (a.warm, a.lag)), mode="reflect"), device=self.w_out.device)
-        drive = jo_drive(yb, self.in_idx, 1.0) * self.in_gain
+        if getattr(a, "jo_delays", 0) > 0:
+            # sensory periphery: JO neuron i sees the signal delayed by (i mod (D+1)) samples (a fixed
+            # delay-line encoding, like frequency/phase-tuned JO subgroups); brain and wire stay fixed
+            n_in = len(self.in_idx); half = n_in // 2
+            dvec = (torch.arange(n_in, device=yb.device) % (a.jo_delays + 1))
+            shifted = torch.stack([torch.roll(yb, int(d), dims=1) for d in range(a.jo_delays + 1)], -1)  # (B, T, D+1)
+            yd = shifted[:, :, dvec]                                                                     # (B, T, n_in)
+            drive = torch.cat([torch.relu(yd[:, :, :half]), torch.relu(-yd[:, :, half:])], -1) * self.in_gain
+        else:
+            drive = jo_drive(yb, self.in_idx, 1.0) * self.in_gain
         if not a.tbptt or not torch.is_grad_enabled():
             h = self.model(InputDrive(self.in_idx, drive), record=idx)[:, 1:]
         else:
@@ -60,6 +114,7 @@ class BrainDenoiser(torch.nn.Module):
     def brain_params(self):
         ps = [self.model.alpha_logit, self.model.bias, self.in_gain]
         if self.a.train_edges: ps.append(self.model.log_gain)
+        if isinstance(self.model, BrainPlus): ps += self.model.plus_params()
         return ps
 
 
@@ -123,6 +178,7 @@ def main():
     p.add_argument("--batch", type=int, default=32); p.add_argument("--eval-batch", type=int, default=100)
     p.add_argument("--lr", type=float, default=1e-3, help="leak / bias / input gain"); p.add_argument("--lr-edge", type=float, default=1e-3)
     p.add_argument("--clip", type=float, default=1.0)
+    p.add_argument("--micro-batch", type=int, default=0, help="split each batch into chunks of this size and accumulate gradients (small GPUs; identical update)")
     p.add_argument("--train-len", type=int, default=0, help="train on random crops of this many samples (0 = full epoch); eval always on full epochs")
     p.add_argument("--tbptt", type=int, default=0, help="truncated-BPTT chunk length in samples (0 = full 600-step unroll)")
     p.add_argument("--wire", default="dn", choices=["dn", "all", "fastdn"], help="neurons under the fixed readout wire: descending/motor, all non-JO, or the fastest-leak half of the DN/motor set")
@@ -133,7 +189,12 @@ def main():
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--rho", type=float, default=0.9); p.add_argument("--alpha-min", type=float, default=0.02); p.add_argument("--alpha-max", type=float, default=0.5)
     p.add_argument("--gain", type=float, default=1.0); p.add_argument("--bias", type=float, default=0.02); p.add_argument("--h-max", type=float, default=10.0)
+    p.add_argument("--jo-delays", type=int, default=0, help="JO delay-line encoding: neuron i gets the input delayed by i mod (D+1) samples (0 = plain half-wave drive)")
     p.add_argument("--lag", type=int, default=24); p.add_argument("--warm", type=int, default=64)
+    p.add_argument("--syn", action="store_true", help="BrainPlus: per-neuron synaptic filter (second-order neurons)")
+    p.add_argument("--adapt", action="store_true", help="BrainPlus: per-neuron spike-frequency adaptation")
+    p.add_argument("--adapt-g", type=float, default=0.3, help="initial adaptation strength")
+    p.add_argument("--slope", action="store_true", help="BrainPlus: per-neuron learnable transfer slope")
     p.add_argument("--no-ref-ridge", action="store_true", help="skip the untrained-brain ridge reference (random readout mode)")
     p.add_argument("--no-fir", action="store_true")
     p.add_argument("--out", type=Path, required=True); p.add_argument("--seed", type=int, default=0)
@@ -168,6 +229,8 @@ def main():
     dn_idx = torch.as_tensor(np.flatnonzero(ne.super_class.isin(["descending_neuron"]).to_numpy() | (ne.flow == "efferent").to_numpy()))
     out_idx = dn_idx if a.wire == "dn" else torch.as_tensor(np.flatnonzero(~is_jo))
     model = make_model(conn, a, a.device)
+    if a.syn or a.adapt or a.slope:
+        model.__class__ = BrainPlus; model.init_plus(a); print(f"BrainPlus neuron tweaks: {model.plus}", flush=True)
     if a.wire == "fastdn":                                   # readout only from the fastest DN/motor neurons (short time constants -> sharper output)
         al = model.alpha().detach().cpu()[dn_idx]; out_idx = dn_idx[torch.argsort(al, descending=True)[: len(dn_idx) // 2]]
     print(f"{conn.summary()}\ninput: {len(in_idx)} JO neurons; fixed readout wire over {len(out_idx)} neurons ({a.wire}); ridge reference on {len(dn_idx)} DN/motor neurons", flush=True)
@@ -191,6 +254,7 @@ def main():
     for q in params: q.requires_grad_(True)
     groups = [{"params": [bd.model.alpha_logit, bd.in_gain], "lr": a.lr},
               {"params": [bd.model.bias], "lr": a.lr if a.lr_bias is None else a.lr_bias}]
+    if isinstance(bd.model, BrainPlus): groups.append({"params": bd.model.plus_params(), "lr": a.lr})
     if a.train_edges: groups.append({"params": [bd.model.log_gain], "lr": a.lr_edge, "weight_decay": a.wd})
     opt = torch.optim.Adam(groups)
     steps_per_pass = -(-len(x["tr"]) // a.batch)
@@ -230,12 +294,16 @@ def main():
             if a.train_len and a.train_len < yb.shape[1]:            # random crop (same offset for the batch): ~T/train_len x faster per step
                 s0 = int(g.integers(0, yb.shape[1] - a.train_len + 1)) if hasattr(g, "integers") else int(torch.randint(0, yb.shape[1] - a.train_len + 1, (1,), generator=g))
                 yb, xb = yb[:, s0:s0 + a.train_len], xb[:, s0:s0 + a.train_len]
-            pred = bd(yb); loss = ((pred - torch.as_tensor(xb, device=a.device)) ** 2).mean()
-            opt.zero_grad(set_to_none=True); loss.backward()
+            opt.zero_grad(set_to_none=True)
+            mb = a.micro_batch if a.micro_batch and a.micro_batch < len(i) else len(i)   # gradient accumulation: same optimizer steps, less GPU memory
+            xt, loss = torch.as_tensor(xb, device=a.device), 0.0
+            for c0 in range(0, len(i), mb):
+                lc = ((bd(yb[c0:c0 + mb]) - xt[c0:c0 + mb]) ** 2).sum() / xt.numel(); lc.backward(); loss = loss + lc.detach()
             gn = torch.nn.utils.clip_grad_norm_(params, a.clip).item(); opt.step()
             if sched is not None: sched.step()
             tot += loss.item() * len(i); k += 1
             if k % 10 == 1: print(f"  pass {ps + 1} step {k}/{-(-n // a.batch)} loss {loss.item():.4f} gradnorm {gn:.3g} {(time.time() - t0) / k:.2f}s/step", flush=True)
+            if k % 25 == 0 and (a.out / "STOP").exists(): break               # early stop requested by the trend watcher
         xv = predict(bd, y["va"], a.eval_batch); mv = metrics(xv, x["va"], y["va"])
         al = bd.model.alpha().detach(); gain = bd.model.log_gain.exp()
         rec = dict(pass_=ps + 1, train_rmse=float(np.sqrt(tot / n)), val_rmse=float(np.sqrt(((xv - x["va"]) ** 2).mean())),
@@ -251,6 +319,7 @@ def main():
                     **({"sched": sched.state_dict()} if sched is not None else {})}, ck)
         json.dump(hist, open(a.out / "history.json", "w"), indent=1)
         if ps - best["pass"] >= a.patience: print("early stop", flush=True); break
+        if (a.out / "STOP").exists(): print(f"STOP file: ending after pass {ps + 1} ({(a.out / 'STOP').read_text().strip()})", flush=True); break
 
     if best["state"] is not None: bd.load_state_dict(best["state"], strict=False)
     xh["brain"] = predict(bd, y["te"], a.eval_batch); res["brain"] = metrics(xh["brain"], x["te"], y["te"], snr0)
@@ -266,7 +335,8 @@ def main():
     json.dump(summary, open(a.out / "summary.json", "w"), indent=1, default=str)
     np.savez(a.out / "results.npz", clean=x["te"], noisy=y["te"], **{f"xhat_{k}": v for k, v in xh.items()},
              **{f"{m}_{k}": v for m, r in res.items() for k, v in r.items()})
-    torch.save({k_: v for k_, v in bd.state_dict().items() if k_ in ("model.alpha_logit", "model.bias", "model.log_gain", "in_gain", "w_out", "b_out", "mu0", "sd0")}, a.out / "brain_params.pt")
+    torch.save({k_: v for k_, v in bd.state_dict().items() if k_ in ("model.alpha_logit", "model.bias", "model.log_gain", "in_gain", "w_out", "b_out", "mu0", "sd0",
+                                                                "model.syn_logit", "model.adapt_logit", "model.adapt_log_g", "model.log_slope")}, a.out / "brain_params.pt")
     print("saved", a.out / "summary.json", flush=True)
 
 

@@ -14,7 +14,7 @@ T = 512
 def load_brain(run_dir, dev):
     S = json.load(open(Path(run_dir) / "summary.json"))["args"]
     a = argparse.Namespace(**{k: v for k, v in S.items()}); a.device = dev; a.tbptt = 0
-    for k, v in (("rho", 0.9), ("alpha_min", 0.02), ("alpha_max", 0.5), ("gain", 1.0), ("bias", 0.02), ("h_max", 10.0), ("lag", 24), ("warm", 64), ("wire", "dn"), ("shuffle", False), ("train_edges", True)):
+    for k, v in (("rho", 0.9), ("alpha_min", 0.02), ("alpha_max", 0.5), ("gain", 1.0), ("bias", 0.02), ("h_max", 10.0), ("lag", 24), ("warm", 64), ("wire", "dn"), ("jo_delays", 0), ("shuffle", False), ("train_edges", True)):
         if not hasattr(a, k): setattr(a, k, v)
     conn = fd.load_malecns(fd.NFLY_DATA)
     keep = conn.neurons.super_class.isin(fd.CENTRAL) | conn.neurons.cell_type.str.startswith("JO", na=False)

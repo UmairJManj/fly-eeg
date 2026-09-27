@@ -10,5 +10,8 @@ for L in logs/fly-lane-*.log; do [ -f "$L" ] || continue; j=$(basename $L .log);
 [ -n "${NO_SUBMIT:-}" ] && exit 0
 n_norm=$(squeue -u $USER -h -n fly-lane -o "%q" | grep -vc debug); n_dbg=$(squeue -u $USER -h -o "%q" | grep -c debug)
 if [ "$n_dbg" -eq 0 ]; then j=$(sbatch --parsable --qos=debug -p milan --gpus-per-node=a100:1 --time=02:00:00 fly-eeg/nesi_fly_lanes_v2.sl 2>&1) && echo "[keeper] submitted debug lane $j"; fi
-while [ "$n_norm" -lt "${NORMAL_TARGET:-4}" ]; do read PART TYPE < <(bash /nesi/project/aut04653/Manj/Foot/tools/pick_gpu.sh)
+# spread pending lanes over every big GPU type (whichever frees first runs); L4 lanes capped at 2 (3x slower per step)
+TYPES=("milan a100" "genoa h100" "genoa pro_6000" "genoa l4"); k=0
+while [ "$n_norm" -lt "${NORMAL_TARGET:-4}" ]; do read PART TYPE <<< "${TYPES[$((k % 4))]}"; k=$((k+1))
+  if [ "$TYPE" = l4 ] && [ "$(squeue -u $USER -h -n fly-lane -o '%b' | grep -c l4)" -ge 2 ]; then continue; fi
   j=$(sbatch --parsable -p $PART --gpus-per-node=$TYPE:1 fly-eeg/nesi_fly_lanes_v2.sl 2>&1) && echo "[keeper] submitted normal lane $j on $PART/$TYPE"; n_norm=$((n_norm+1)); done
