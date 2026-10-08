@@ -330,6 +330,8 @@ def main():
     p.add_argument("--cut-feedback", action="store_true", help="remove every synapse that points back to an earlier layer (layer = hop distance from the JO input), kept at zero during training")
     p.add_argument("--no-ref-ridge", action="store_true", help="skip the untrained-brain ridge reference (random readout mode)")
     p.add_argument("--no-fir", action="store_true")
+    p.add_argument("--init", type=Path, default=None, help="warm start from a brain_params.pt (same architecture flags)")
+    p.add_argument("--eval-only", action="store_true", help="with --init: evaluate the loaded brain on the test set and exit")
     p.add_argument("--out", type=Path, required=True); p.add_argument("--seed", type=int, default=0)
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True); a.snr0 = None
@@ -383,7 +385,13 @@ def main():
             xh["r0"] = np.concatenate([r.predict(bd.states(y["te"][b:b + a.eval_batch], dn_idx).reshape(-1, K)).reshape(-1, y["te"].shape[1]).float().cpu().numpy()
                                        for b in range(0, len(y["te"]), a.eval_batch)])
         res["r0"] = metrics(xh["r0"], x["te"], y["te"], snr0); print(f"{'untrained brain + ridge (r0)':30s} test {fmt(res['r0'])}   (lambda {r.lam})", flush=True)
+    if a.init:   # warm start from a saved brain_params.pt (also restores its fixed readout w_out/mu0/sd0)
+        sd = torch.load(a.init, map_location=a.device, weights_only=False)
+        r_ = bd.load_state_dict(sd, strict=False); print(f"init from {a.init}: loaded {len(sd)} tensors, unexpected {r_.unexpected_keys}", flush=True)
     xh["untrained"] = predict(bd, y["te"], a.eval_batch); res["untrained"] = metrics(xh["untrained"], x["te"], y["te"], snr0)
+    if a.eval_only:
+        print(f"{'init brain (eval only)':30s} test {fmt(res['untrained'])}", flush=True)
+        json.dump({k: {m: float(v.mean()) for m, v in r.items()} for k, r in res.items()}, open(a.out / "eval.json", "w"), indent=1); return
     print(f"{'untrained brain + fixed readout':30s} test {fmt(res['untrained'])}   ({time.time() - T0:.0f}s)", flush=True)
 
     # ---- train the brain ----
