@@ -275,6 +275,18 @@ def set_fixed_readout(bd, x, y, a, rng):
     return {"r0": (xhat0, m0)}
 
 
+def erp_like(n, T, rng, fs=256.0):
+    """n random ERP-shaped transients (sum of 1-3 Gaussian components, 30-150 ms wide, random sign, latency and
+    amplitude 0.2-1.2 x clean std); used to teach the brain that evoked responses are signal, not artifact."""
+    t = np.arange(T) / fs; out = np.zeros((n, T), np.float32)
+    for j in range(n):
+        t0 = rng.uniform(0.2, T / fs - 0.6)
+        for _ in range(rng.integers(1, 4)):
+            c, w = t0 + rng.uniform(0.05, 0.5), rng.uniform(0.03, 0.15)
+            out[j] += rng.choice([-1, 1]) * rng.uniform(0.2, 1.2) * np.exp(-((t - c) ** 2) / (2 * w * w))
+    return out
+
+
 def shuffled_connectome(conn):
     g = torch.Generator().manual_seed(0)
     return build_connectome(conn.neurons, conn.pre, conn.post[torch.randperm(conn.n_edges, generator=g)], conn.syn_count, conn.sign)
@@ -330,6 +342,7 @@ def main():
     p.add_argument("--cut-feedback", action="store_true", help="remove every synapse that points back to an earlier layer (layer = hop distance from the JO input), kept at zero during training")
     p.add_argument("--no-ref-ridge", action="store_true", help="skip the untrained-brain ridge reference (random readout mode)")
     p.add_argument("--no-fir", action="store_true")
+    p.add_argument("--erp-aug", type=float, default=0.0, help="fraction of training epochs that get a random ERP-like transient in BOTH clean and noisy")
     p.add_argument("--val-max", type=int, default=0, help="validate each pass on a fixed random subset of this many val epochs")
     p.add_argument("--init", type=Path, default=None, help="warm start from a brain_params.pt (same architecture flags)")
     p.add_argument("--eval-only", action="store_true", help="with --init: evaluate the loaded brain on the test set and exit")
@@ -438,7 +451,7 @@ def main():
         hist, start, best = c["hist"], c["pass"] + 1, c["best"]
         if sched is not None and "sched" in c: sched.load_state_dict(c["sched"])
         print(f"resumed from pass {start} (best val gain {best['val_gain']:+.2f} dB @ pass {best['pass'] + 1})", flush=True)
-    n, g = len(x["tr"]), torch.Generator().manual_seed(a.seed)
+    n, g = len(x["tr"]), torch.Generator().manual_seed(a.seed); erp_rng = np.random.default_rng(1000 + a.seed)
     mid, cm = a.out / "ckpt_mid.pt", None          # mid-pass checkpoint: 1 h debug lanes are shorter than one slow pass
     if mid.exists():
         cm = torch.load(mid, map_location=a.device, weights_only=False)
@@ -453,6 +466,9 @@ def main():
             perm, tot, k = cm["perm"], cm["tot"], cm["k"]; g.set_state(cm["g"].cpu()); t0 = time.time() - cm["sec"]
         for i0 in range(k * a.batch, n, a.batch):
             i = np.sort(perm[i0:i0 + a.batch]); yb, xb = y["tr"][i], x["tr"][i]
+            if a.erp_aug > 0:                                          # evoked responses belong to the clean EEG: add them to target AND input
+                e = erp_like(len(i), yb.shape[1], erp_rng) * x["tr"][i].std(1, keepdims=True) * (erp_rng.random((len(i), 1)) < a.erp_aug)
+                yb, xb = (yb + e).astype(np.float32), (xb + e).astype(np.float32)
             if a.train_len and a.train_len < yb.shape[1]:            # random crop (same offset for the batch): ~T/train_len x faster per step
                 s0 = int(g.integers(0, yb.shape[1] - a.train_len + 1)) if hasattr(g, "integers") else int(torch.randint(0, yb.shape[1] - a.train_len + 1, (1,), generator=g))
                 yb, xb = yb[:, s0:s0 + a.train_len], xb[:, s0:s0 + a.train_len]
