@@ -275,7 +275,7 @@ def set_fixed_readout(bd, x, y, a, rng):
     return {"r0": (xhat0, m0)}
 
 
-def erp_like(n, T, rng, fs=256.0):
+def erp_like(n, T, rng, fs=256.0, amax=1.2):
     """n random ERP-shaped transients (sum of 1-3 Gaussian components, 30-150 ms wide, random sign, latency and
     amplitude 0.2-1.2 x clean std); used to teach the brain that evoked responses are signal, not artifact."""
     t = np.arange(T) / fs; out = np.zeros((n, T), np.float32)
@@ -283,7 +283,7 @@ def erp_like(n, T, rng, fs=256.0):
         t0 = rng.uniform(0.2, T / fs - 0.6)
         for _ in range(rng.integers(1, 4)):
             c, w = t0 + rng.uniform(0.05, 0.5), rng.uniform(0.03, 0.15)
-            out[j] += rng.choice([-1, 1]) * rng.uniform(0.2, 1.2) * np.exp(-((t - c) ** 2) / (2 * w * w))
+            out[j] += rng.choice([-1, 1]) * rng.uniform(0.2, amax) * np.exp(-((t - c) ** 2) / (2 * w * w))
     return out
 
 
@@ -343,6 +343,7 @@ def main():
     p.add_argument("--no-ref-ridge", action="store_true", help="skip the untrained-brain ridge reference (random readout mode)")
     p.add_argument("--no-fir", action="store_true")
     p.add_argument("--erp-aug", type=float, default=0.0, help="fraction of training epochs that get a random ERP-like transient in BOTH clean and noisy")
+    p.add_argument("--erp-amax", type=float, default=1.2, help="largest ERP component amplitude (x clean std) for --erp-aug")
     p.add_argument("--val-max", type=int, default=0, help="validate each pass on a fixed random subset of this many val epochs")
     p.add_argument("--init", type=Path, default=None, help="warm start from a brain_params.pt (same architecture flags)")
     p.add_argument("--eval-only", action="store_true", help="with --init: evaluate the loaded brain on the test set and exit")
@@ -467,7 +468,7 @@ def main():
         for i0 in range(k * a.batch, n, a.batch):
             i = np.sort(perm[i0:i0 + a.batch]); yb, xb = y["tr"][i], x["tr"][i]
             if a.erp_aug > 0:                                          # evoked responses belong to the clean EEG: add them to target AND input
-                e = erp_like(len(i), yb.shape[1], erp_rng) * x["tr"][i].std(1, keepdims=True) * (erp_rng.random((len(i), 1)) < a.erp_aug)
+                e = erp_like(len(i), yb.shape[1], erp_rng, amax=a.erp_amax) * x["tr"][i].std(1, keepdims=True) * (erp_rng.random((len(i), 1)) < a.erp_aug)
                 yb, xb = (yb + e).astype(np.float32), (xb + e).astype(np.float32)
             if a.train_len and a.train_len < yb.shape[1]:            # random crop (same offset for the batch): ~T/train_len x faster per step
                 s0 = int(g.integers(0, yb.shape[1] - a.train_len + 1)) if hasattr(g, "integers") else int(torch.randint(0, yb.shape[1] - a.train_len + 1, (1,), generator=g))
