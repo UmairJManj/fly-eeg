@@ -116,6 +116,7 @@ class BrainDenoiser(torch.nn.Module):
         self.register_buffer("mu0", torch.zeros(())); self.register_buffer("sd0", torch.ones(()))
         self.out_scale = torch.nn.Parameter(torch.tensor(0.1 if getattr(a, "residual", False) else 1.0))
         self.out_bias = torch.nn.Parameter(torch.zeros(()))
+        self.out_scale2 = torch.nn.Parameter(torch.zeros(())); self.out_bias2 = torch.nn.Parameter(torch.zeros(()))   # --multirate coarse path, starts OFF
         self.w_train = torch.nn.Parameter(torch.zeros(len(out_idx)))
 
     def states(self, y, idx=None):
@@ -185,18 +186,38 @@ class BrainDenoiser(torch.nn.Module):
         w = self.w_out + (self.w_train if getattr(self.a, "train_readout", False) else 0)
         return (h @ w + self.b_out - self.mu0) / self.sd0
 
-    def forward(self, y):
-        a = self.a
-        if getattr(a, "bidir", False):          # same fly brain run forward and on the time-reversed signal: past AND future context
+    def _brain_artifact(self, y):
+        """Fixed readout of the (optionally bidirectional) brain response to y: (B, T)."""
+        if getattr(self.a, "bidir", False):          # same fly brain run forward and on the time-reversed signal: past AND future context
             if torch.is_tensor(y): yy = torch.cat([y, torch.flip(y, dims=[1])], 0)
             else: yy = np.concatenate([y, y[:, ::-1]], 0)
             hh = self.states(yy); B = y.shape[0]                 # one batched unroll for both directions
             h = 0.5 * (hh[:B] + torch.flip(hh[B:], dims=[1]))
         else:
             h = self.states(y)
-        out = self.readout(h)
+        return self.readout(h)
+
+    def _coarse(self, y):
+        """--multirate K: the SAME brain run on the K x averaged signal (one step = K samples, so every neuron's
+        time constant covers K x longer real time: delta-band context), read out by the same wire, upsampled."""
+        a, K = self.a, self.a.multirate; T = y.shape[1]
+        yt = y if torch.is_tensor(y) else torch.as_tensor(np.ascontiguousarray(y), device=self.w_out.device)
+        yl = torch.nn.functional.avg_pool1d(yt[:, None, :].float(), K, K)[:, 0, :]
+        saved = (a.warm, a.lag, getattr(a, "jo_span", 0))
+        a.warm, a.lag, a.jo_span = max(4, a.warm // K), max(1, a.lag // K), (saved[2] // K if saved[2] else 0)
+        try:
+            r = self._brain_artifact(yl)
+        finally:
+            a.warm, a.lag, a.jo_span = saved
+        return torch.nn.functional.interpolate(r[:, None, :], size=T, mode="linear", align_corners=False)[:, 0, :]
+
+    def forward(self, y):
+        a = self.a
+        out = self._brain_artifact(y)
         if getattr(a, "out_affine", False) or getattr(a, "residual", False):
             out = self.out_scale * out + self.out_bias
+        if getattr(a, "multirate", 0) > 1:
+            out = out + self.out_scale2 * self._coarse(y) + self.out_bias2
         if getattr(a, "residual", False):       # brain estimates the ARTIFACT: clean = noisy - brain output
             out = (y.to(out.device, out.dtype) if torch.is_tensor(y) else torch.as_tensor(y, device=out.device, dtype=out.dtype)) - out
         return out   # (B, T)
@@ -206,6 +227,7 @@ class BrainDenoiser(torch.nn.Module):
         if self.a.train_edges: ps.append(self.model.log_gain)
         if isinstance(self.model, BrainPlus): ps += self.model.plus_params()
         if getattr(self.a, "out_affine", False) or getattr(self.a, "residual", False): ps += [self.out_scale, self.out_bias]
+        if getattr(self.a, "multirate", 0) > 1: ps += [self.out_scale2, self.out_bias2]
         if getattr(self.a, "train_readout", False): ps += [self.w_train]
         if isinstance(self.model, BrainRewire): ps += self.model.rewire_params()
         return ps
@@ -342,6 +364,7 @@ def main():
     p.add_argument("--cut-feedback", action="store_true", help="remove every synapse that points back to an earlier layer (layer = hop distance from the JO input), kept at zero during training")
     p.add_argument("--no-ref-ridge", action="store_true", help="skip the untrained-brain ridge reference (random readout mode)")
     p.add_argument("--no-fir", action="store_true")
+    p.add_argument("--multirate", type=int, default=0, help="K>1: add the same brain run on the K x downsampled signal (slow, delta-band context) through its own zero-initialised output scale")
     p.add_argument("--erp-aug", type=float, default=0.0, help="fraction of training epochs that get a random ERP-like transient in BOTH clean and noisy")
     p.add_argument("--erp-amax", type=float, default=1.2, help="largest ERP component amplitude (x clean std) for --erp-aug")
     p.add_argument("--val-max", type=int, default=0, help="validate each pass on a fixed random subset of this many val epochs")
@@ -419,6 +442,7 @@ def main():
     if isinstance(bd.model, BrainPlus): groups.append({"params": bd.model.plus_params(), "lr": a.lr})
     if a.train_edges: groups.append({"params": [bd.model.log_gain], "lr": a.lr_edge, "weight_decay": a.wd})
     if a.out_affine or a.residual: groups.append({"params": [bd.out_scale, bd.out_bias], "lr": a.lr})
+    if a.multirate > 1: groups.append({"params": [bd.out_scale2, bd.out_bias2], "lr": a.lr})
     if a.train_readout: groups.append({"params": [bd.w_train], "lr": a.lr * 0.1})
     if isinstance(bd.model, BrainRewire): groups.append({"params": bd.model.rewire_params(), "lr": a.lr_edge})
     opt = torch.optim.Adam(groups)
@@ -540,7 +564,7 @@ def main():
              **{f"{m}_{k}": v for m, r in res.items() for k, v in r.items()})
     torch.save({k_: v for k_, v in bd.state_dict().items() if k_ in ("model.alpha_logit", "model.bias", "model.log_gain", "in_gain", "w_out", "b_out", "mu0", "sd0",
                                                                 "model.syn_logit", "model.adapt_logit", "model.adapt_log_g", "model.log_slope",
-                                                                "out_scale", "out_bias", "w_train", "model.w_new", "model.sg", "model.pre", "model.post")}, a.out / "brain_params.pt")
+                                                                "out_scale", "out_bias", "out_scale2", "out_bias2", "w_train", "model.w_new", "model.sg", "model.pre", "model.post")}, a.out / "brain_params.pt")
     print("saved", a.out / "summary.json", flush=True)
 
 
