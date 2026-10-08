@@ -21,8 +21,8 @@ def curve(tag):
         return []
 
 
-def ref_curve():
-    cs = [np.maximum.accumulate(curve(t)) for t in REFS if curve(t)]
+def ref_curve(exclude=None):
+    cs = [np.maximum.accumulate(curve(t)) for t in REFS if curve(t) and t != exclude]
     L = max(len(c) for c in cs)
     return [float(np.mean([c[i] for c in cs if len(c) > i])) for i in range(L)], len(cs)
 
@@ -38,12 +38,12 @@ def last_step(tag):
 
 def main():
     ref, nref = ref_curve()
-    tags = [l.split()[0] for l in open(BRAIN / "units.txt") if re.match(r"^(eog|emg|both)_N_", l)]
+    tags = [l.split()[0] for l in open(BRAIN / "units.txt") if re.match(r"^(eog|emg|both|ecg|motion)_[NX]_", l)]
     print(f"--- {time.strftime('%H:%M')} round N (ref = jo48 best-so-far mean of {nref} run(s): {' '.join(f'{v:.1f}' for v in ref)})")
     for t in tags:
         d = BRAIN / t
         if (d / "summary.json").exists():
-            s = json.load(open(d / "summary.json")); print(f"  {t:22s} DONE test {s['brain']['snr_gain']:+.2f} dB CC {s['brain']['cc']:.3f} (FIR {s['fir']['snr_gain']:+.2f})"); continue
+            s = json.load(open(d / "summary.json")); print(f"  {t:22s} DONE test CC {100 * s['brain']['cc']:.1f}%  SNR {s['brain']['snr_gain']:+.2f} dB  RRMSE {s['brain']['rrmse']:.3f}"); continue
         if not d.exists():
             print(f"  {t:22s} queued"); continue
         c = curve(t); st, age = last_step(t)
@@ -52,8 +52,9 @@ def main():
         verdict = ""
         if c:
             b = np.maximum.accumulate(c); k = len(b)
-            if k <= len(ref) and t.startswith("eog_"): verdict = f" | vs ref @p{k}: {b[-1] - ref[k - 1]:+.1f}"
-            behind = [i for i in range(len(b)) if i < len(ref) and i + 1 >= MIN_PASS and b[i] < ref[i] - MARGIN]
+            rt, _ = ref_curve(exclude=t)
+            if k <= len(rt) and t.startswith("eog_"): verdict = f" | vs ref @p{k}: {b[-1] - rt[k - 1]:+.1f}"
+            behind = [i for i in range(len(b)) if i < len(rt) and i + 1 >= MIN_PASS and b[i] < rt[i] - MARGIN]
             if (t.startswith("eog_") and not any(p in t for p in PROTECTED) and len(behind) >= 2
                     and behind[-1] == len(b) - 1 and behind[-2] == len(b) - 2 and not (d / "STOP").exists()):
                 (d / "STOP").write_text(f"trails jo48 ref by >{MARGIN} dB at passes {behind[-2] + 1},{behind[-1] + 1}")

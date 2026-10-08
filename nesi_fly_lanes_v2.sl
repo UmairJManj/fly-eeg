@@ -3,7 +3,7 @@
 #   <tag>  <fly_eeg_brain.py args except --out/--batch>        (lines starting with # are ignored)
 # A lane claims the first unclaimed, unfinished arm (mkdir lock), runs it (resumable from ckpt.pt), plots it,
 # then re-reads the file for the next arm. With nothing to do it idles (re-checking every 5 min) so new arms
-# appended to the file start immediately. Debug-QOS lanes self-requeue before the 2 h wall.
+# appended to the file start immediately. Debug-QOS lanes self-requeue 5 min before the wall (debug max is 1 h since 2026-10-01).
 #SBATCH --job-name=fly-lane
 #SBATCH --account=aut04653
 #SBATCH --time=12:00:00
@@ -17,7 +17,7 @@ RUN=$ROOT/brain; LOCKS=$RUN/.locks; DONE=$RUN/.done; FAIL=$RUN/.fail; UNITS_FILE
 GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
 case "$GPU" in *L4*) BATCH=32;; *) BATCH=64;; esac      # bigger batches: fewer steps per pass (crop training keeps memory in check)
 T_START=$(date +%s); WALL=$(( ${LANE_HOURS:-11} * 3600 )); [ "${SLURM_JOB_QOS:-}" = "debug" ] && WALL=6300
-GUARD_PID=""; if [ "${SLURM_JOB_QOS:-}" = "debug" ]; then ( sleep 6480 && echo "[guard] requeueing before wall" && scontrol requeue "$SLURM_JOB_ID" ) & GUARD_PID=$!; fi
+GUARD_PID=""; if [ "${SLURM_JOB_QOS:-}" = "debug" ]; then ( sleep $(( $(squeue -h -j "$SLURM_JOB_ID" -o %L | awk -F: '{ if (NF==3) print $1*3600+$2*60+$3; else print $1*60+$2 }') - 300 )) && echo "[guard] requeueing before wall" && scontrol requeue "$SLURM_JOB_ID" ) & GUARD_PID=$!; fi
 for lock in "$LOCKS"/*; do [ -d "$lock" ] || continue; [ "$(cat "$lock/owner" 2>/dev/null)" = "$SLURM_JOB_ID" ] && rm -rf "$lock"; done
 claim() { local c=$1 lock=$LOCKS/$1; [ -f "$DONE/$c" ] && return 1; [ -f "$RUN/$c/summary.json" ] && return 1; [ -f "$FAIL/$c.2" ] && return 1
   if mkdir "$lock" 2>/dev/null; then echo "$SLURM_JOB_ID" > "$lock/owner"; return 0; fi

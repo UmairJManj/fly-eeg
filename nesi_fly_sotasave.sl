@@ -13,5 +13,5 @@ ROOT=/nesi/project/aut04653/Manj/Fly; source $ROOT/env.sh; cd "$ROOT/nfly"; expo
 ARTIFACT=${ARTIFACT:-eog}; NB=/nesi/nobackup/aut04653/Manj/Fly; C=$NB/states_${ARTIFACT}_whole_aug12_disjoint_raw
 [ -d $C ] || { echo "== $(date) cache"; uv run --no-sync python ../fly-eeg/make_raw_cache.py $C --artifact $ARTIFACT --aug 12 --artifact-split disjoint; }
 echo "== $(date) baselines (leak-free)"
-uv run --no-sync python ../fly-eeg/fly_eeg_readout_v2.py $C --tag sotasave --configs "ccnn+s20000,scnn+s20000,eegdir+s20000" --seeds 3 --save-model $NB/tcn_models/sota_$ARTIFACT
+uv run --no-sync python ../fly-eeg/fly_eeg_readout_v2.py $C --tag sotasave --configs "${CONFIGS:-ccnn+s20000,scnn+s20000,eegdir+s20000}" --seeds 3 --save-model $NB/tcn_models/sota_$ARTIFACT
 echo "== $(date) done"

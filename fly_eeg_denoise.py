@@ -88,6 +88,13 @@ def load_data(a, rng):
     """x (clean) and y (noisy) dicts with tr / va / te splits, SNR uniform in [-7, 2] dB."""
     eeg = fetch("EEG_all_epochs.npy")
     art = {"eog": fetch("EOG_all_epochs.npy"), "emg": fetch("EMG_all_epochs.npy")}
+    if a.artifact == "ecg":                                  # MIT-BIH ECG pool built by cmp/ext_export.py (not downloadable from RAW)
+        art["ecg"] = np.load(DATA / "ECG_all_epochs.npy")
+    if a.artifact == "line":                                 # synthetic mains interference: 50 Hz (+/-0.5 Hz drift) + 100 Hz harmonic, AM, random phase
+        r2 = np.random.default_rng(123); n, T = 6000, eeg.shape[1]; t = np.arange(T) / 256.0
+        f0 = r2.uniform(49.5, 50.5, (n, 1)); ph = r2.uniform(0, 2 * np.pi, (n, 2)); h2 = r2.uniform(0.1, 0.5, (n, 1))
+        am = 1 + r2.uniform(0, 0.3, (n, 1)) * np.sin(2 * np.pi * r2.uniform(0.1, 1.0, (n, 1)) * t + r2.uniform(0, 2 * np.pi, (n, 1)))
+        art["line"] = (am * (np.sin(2 * np.pi * f0 * t + ph[:, :1]) + h2 * np.sin(2 * np.pi * 2 * f0 * t + ph[:, 1:]))).astype(np.float32)
     if a.protocol == "centered":
         return load_centered(a, rng, eeg, art["eog"], art["emg"])
     if a.artifact == "both":
@@ -106,7 +113,8 @@ def load_data(a, rng):
                      ("te", idx[a.n_train:a.n_train + a.n_test])]:
         if name != "te" and a.aug > 1:                     # --aug also for the whole protocol: fresh artifact + SNR draws
             sl = np.tile(sl, a.aug)
-        snr = rng.uniform(-7, 2, size=len(sl))
+        lo, hi = (getattr(a, "snr_lo", -7.0), getattr(a, "snr_hi", 2.0)) if name != "te" else (-7.0, 2.0)   # test set always the standard -7..2 dB
+        snr = rng.uniform(lo, hi, size=len(sl))
         sets[name] = contaminate(eeg[sl], pools[name], snr, rng)
     return {k: v[0] for k, v in sets.items()}, {k: v[1] for k, v in sets.items()}, None
 
@@ -366,7 +374,7 @@ def run_fly(conn, label, in_idx, out_idx, x, y, a, snr0=None):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--artifact", default="eog", choices=["eog", "emg", "both"])
+    p.add_argument("--artifact", default="eog", choices=["eog", "emg", "both", "ecg", "line"])
     p.add_argument("--protocol", default="whole", choices=["whole", "centered"],
                    help="whole: EEGdenoiseNet mixing over the full epoch, SNR U(-7, 2); centered: SPAR-EEG middle-third layout, test at 26 levels (n-test = records per level)")
     p.add_argument("--n-train", type=int, default=800)

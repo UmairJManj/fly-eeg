@@ -14,7 +14,7 @@ T = 512
 def load_brain(run_dir, dev):
     S = json.load(open(Path(run_dir) / "summary.json"))["args"]
     a = argparse.Namespace(**{k: v for k, v in S.items()}); a.device = dev; a.tbptt = 0
-    for k, v in (("rho", 0.9), ("alpha_min", 0.02), ("alpha_max", 0.5), ("gain", 1.0), ("bias", 0.02), ("h_max", 10.0), ("lag", 24), ("warm", 64), ("wire", "dn"), ("jo_delays", 0), ("shuffle", False), ("train_edges", True)):
+    for k, v in (("rho", 0.9), ("alpha_min", 0.02), ("alpha_max", 0.5), ("gain", 1.0), ("bias", 0.02), ("h_max", 10.0), ("lag", 24), ("warm", 64), ("wire", "dn"), ("jo_delays", 0), ("shuffle", False), ("train_edges", True), ("new_edges", 0), ("free_signs", False)):
         if not hasattr(a, k): setattr(a, k, v)
     conn = fd.load_malecns(fd.NFLY_DATA)
     keep = conn.neurons.super_class.isin(fd.CENTRAL) | conn.neurons.cell_type.str.startswith("JO", na=False)
@@ -24,6 +24,9 @@ def load_brain(run_dir, dev):
     in_idx = torch.as_tensor(np.flatnonzero(is_jo))
     dn_idx = torch.as_tensor(np.flatnonzero(ne.super_class.isin(["descending_neuron"]).to_numpy() | (ne.flow == "efferent").to_numpy()))
     model = fd.make_model(conn, a, dev)
+    if a.new_edges > 0 or a.free_signs:
+        from fly_eeg_brain import BrainRewire
+        model.__class__ = BrainRewire; model.init_rewire(a, in_idx.to(dev), torch.as_tensor(dn_idx if a.wire == "dn" else np.flatnonzero(~is_jo)).to(dev))
     if a.wire == "fastdn":
         al = model.alpha().detach().cpu()[dn_idx]; out_idx = dn_idx[torch.argsort(al, descending=True)[: len(dn_idx) // 2]]
     else: out_idx = dn_idx if a.wire == "dn" else torch.as_tensor(np.flatnonzero(~is_jo))

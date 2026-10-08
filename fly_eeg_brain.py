@@ -15,7 +15,7 @@ untrained brain + ridge (r0), and optionally the shuffled-wiring brain trained i
 
 Run from the nfly folder:  uv run --no-sync python ../fly-eeg/fly_eeg_brain.py --artifact eog --out DIR
 """
-import argparse, json, time, sys
+import os, argparse, json, time, sys
 from pathlib import Path
 import numpy as np, torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -23,7 +23,7 @@ from fly_eeg_denoise import (load_data, metrics, fmt, paired, make_model, jo_dri
                              fir_features, CENTRAL, NFLY_DATA)
 from nfly.connectome import load_malecns, build_connectome
 from nfly.brain import InputDrive
-from nfly.brain.rnn import ConnectomeRNN
+from nfly.brain.rnn import ConnectomeRNN, Weights
 
 
 class BrainPlus(ConnectomeRNN):
@@ -70,6 +70,40 @@ class BrainPlus(ConnectomeRNN):
         return torch.stack(hist, dim=1)
 
 
+class BrainRewire(ConnectomeRNN):
+    """The fly connectome as the STARTING wiring, opened up: (1) `--new-edges N` trainable synapses added (half from the
+    Johnston's-organ input neurons straight to the readout neurons, half between random central neurons), starting at
+    zero strength with free sign; (2) `--free-signs`: every existing synapse may flip excitatory/inhibitory."""
+    def init_rewire(self, a, in_idx, out_idx):
+        dev = self.w0.device; g = torch.Generator().manual_seed(7); self.n_old = self.pre.numel(); N = a.new_edges
+        if N > 0:
+            h = N // 2
+            pre1 = in_idx[torch.randint(len(in_idx), (h,), generator=g)]; post1 = out_idx[torch.randint(len(out_idx), (h,), generator=g)]
+            pre2 = torch.randint(self.n, (N - h,), generator=g); post2 = torch.randint(self.n, (N - h,), generator=g)
+            self.pre = torch.cat([self.pre, torch.cat([pre1.cpu(), pre2]).to(dev)]); self.post = torch.cat([self.post, torch.cat([post1.cpu(), post2]).to(dev)])
+        self.w_new = torch.nn.Parameter(torch.zeros(N, device=dev))
+        self.register_buffer("w_scale", self.w0.abs().median().reshape(()))   # new synapses learn in units of a typical synapse
+        print(f"  new-synapse unit = median |w0| = {float(self.w_scale):.2e}", flush=True)
+        self.free_signs = a.free_signs
+        if a.free_signs: self.sg = torch.nn.Parameter(self.sign.float().clone())
+        self._cached = None
+
+    def rewire_params(self):
+        return [self.w_new] + ([self.sg] if self.free_signs else [])
+
+    def edge_weights(self):
+        s = self.sg if self.free_signs else self.sign
+        return torch.cat([s * self.w0 * torch.exp(self.log_gain), self.w_new * self.w_scale])
+
+    def weights(self):
+        if torch.is_grad_enabled():
+            return Weights(self.edge_weights(), self.alpha())
+        key = (self.log_gain._version, self.w_new._version, self.alpha_logit._version, self.sg._version if self.free_signs else 0)
+        if self._cached is None or self._cached[0] != key:
+            self._cached = (key, Weights(self.edge_weights(), self.alpha()))
+        return self._cached[1]
+
+
 class BrainDenoiser(torch.nn.Module):
     """Brain + fixed linear readout. out(t) = (h_out(t) . w_out + b_out - mu0) / sd0, with the state
     aligned `lag` samples after the input (a fixed output delay of lag/256 s)."""
@@ -80,6 +114,9 @@ class BrainDenoiser(torch.nn.Module):
         self.in_gain = torch.nn.Parameter(torch.full((len(in_idx),), float(a.gain)))
         self.register_buffer("w_out", torch.zeros(len(out_idx))); self.register_buffer("b_out", torch.zeros(()))
         self.register_buffer("mu0", torch.zeros(())); self.register_buffer("sd0", torch.ones(()))
+        self.out_scale = torch.nn.Parameter(torch.tensor(0.1 if getattr(a, "residual", False) else 1.0))
+        self.out_bias = torch.nn.Parameter(torch.zeros(()))
+        self.w_train = torch.nn.Parameter(torch.zeros(len(out_idx)))
 
     def states(self, y, idx=None):
         """Recorded activity of neurons `idx` (default: the readout wire's neurons), aligned to the input.
@@ -87,17 +124,53 @@ class BrainDenoiser(torch.nn.Module):
         (truncated BPTT: shorter, better-conditioned gradient paths; the forward dynamics are unchanged)."""
         a, T = self.a, y.shape[1]
         idx = self.out_idx if idx is None else idx
-        yb = torch.as_tensor(np.pad(y, ((0, 0), (a.warm, a.lag)), mode="reflect"), device=self.w_out.device)
-        if getattr(a, "jo_delays", 0) > 0:
+        if torch.is_tensor(y):   # differentiable path (multi-step training): torch reflect padding
+            yb = torch.nn.functional.pad(y.to(self.w_out.device)[:, None, :], (a.warm, a.lag), mode="reflect")[:, 0, :]
+        else:
+            yb = torch.as_tensor(np.pad(y, ((0, 0), (a.warm, a.lag)), mode="reflect"), device=self.w_out.device)
+        if getattr(a, "filterbank", 0) > 0:
+            # cochlea-like periphery: JO neuron i gets band (i mod K) of the signal (log-spaced 1-80 Hz FFT bands),
+            # delayed by ((i // K) mod (D+1)) samples; +/- halves as before. Brain itself unchanged.
+            n_in = len(self.in_idx); half = n_in // 2; K = a.filterbank; D = max(0, getattr(a, "jo_delays", 0))
+            Tt = yb.shape[1]; f = torch.fft.rfftfreq(Tt, d=1 / 256.0).to(yb.device); edges = np.geomspace(1.0, 80.0, K + 1)
+            Y = torch.fft.rfft(yb, dim=1)
+            bands = torch.stack([torch.fft.irfft(Y * ((f >= edges[k]) & (f < edges[k + 1])).to(Y.dtype), n=Tt, dim=1) for k in range(K)], -1)  # (B,T,K)
+            bands = bands / (bands.std(1, keepdim=True) + 1e-6) * yb.std(1, keepdim=True)[..., None]
+            i = torch.arange(n_in, device=yb.device); bi = i % K; di = (i // K) % (D + 1)
+            yd = torch.gather(torch.stack([torch.roll(bands, d, dims=1) for d in range(D + 1)], -1).flatten(2), 2,
+                              (bi * (D + 1) + di).view(1, 1, -1).expand(yb.shape[0], Tt, -1))
+            drive = torch.cat([torch.relu(yd[:, :, :half]), torch.relu(-yd[:, :, half:])], -1) * self.in_gain
+        elif getattr(a, "jo_delays", 0) > 0:
             # sensory periphery: JO neuron i sees the signal delayed by (i mod (D+1)) samples (a fixed
             # delay-line encoding, like frequency/phase-tuned JO subgroups); brain and wire stay fixed
             n_in = len(self.in_idx); half = n_in // 2
             dvec = (torch.arange(n_in, device=yb.device) % (a.jo_delays + 1))
-            shifted = torch.stack([torch.roll(yb, int(d), dims=1) for d in range(a.jo_delays + 1)], -1)  # (B, T, D+1)
+            span = getattr(a, "jo_span", 0)
+            if span and span > a.jo_delays:   # D+1 taps spread geometrically over 0..span samples, zero-filled shifts (no wrap)
+                m = a.jo_delays
+                while True:                                   # more geometric points until D+1 distinct integer taps
+                    taps = np.unique(np.round(np.concatenate([[0], np.geomspace(1, span, m)])).astype(int))
+                    if len(taps) >= a.jo_delays + 1: break
+                    m += 1
+                taps = taps[np.round(np.linspace(0, len(taps) - 1, a.jo_delays + 1)).astype(int)]
+                Tt = yb.shape[1]
+                shifted = torch.stack([torch.nn.functional.pad(yb, (int(d), 0))[:, :Tt] for d in taps], -1)
+            else:
+                shifted = torch.stack([torch.roll(yb, int(d), dims=1) for d in range(a.jo_delays + 1)], -1)  # (B, T, D+1)
             yd = shifted[:, :, dvec]                                                                     # (B, T, n_in)
             drive = torch.cat([torch.relu(yd[:, :, :half]), torch.relu(-yd[:, :, half:])], -1) * self.in_gain
         else:
             drive = jo_drive(yb, self.in_idx, 1.0) * self.in_gain
+        if getattr(a, "envelope", False):
+            # burst cue: a quarter of the JO neurons get the >30 Hz amplitude envelope (smoothed |high-pass|), delayed like the others
+            n_in = len(self.in_idx); q = n_in // 4; Tt = yb.shape[1]; D = max(0, getattr(a, "jo_delays", 0))
+            f = torch.fft.rfftfreq(Tt, d=1 / 256.0).to(yb.device)
+            hp = torch.fft.irfft(torch.fft.rfft(yb, dim=1) * (f >= 30).to(yb.dtype), n=Tt, dim=1)
+            env = torch.nn.functional.avg_pool1d(hp.abs()[:, None, :], 9, stride=1, padding=4)[:, 0, :]
+            env = env / (yb.std(1, keepdim=True) + 1e-6)
+            j = torch.arange(n_in - q, n_in, device=yb.device); dj = (j % (D + 1))
+            E = torch.stack([torch.roll(env, int(d), dims=1) for d in range(D + 1)], -1)[:, :, dj]       # (B, T, q)
+            drive = torch.cat([drive[:, :, : n_in - q], E * self.in_gain[n_in - q:]], -1)
         if not a.tbptt or not torch.is_grad_enabled():
             h = self.model(InputDrive(self.in_idx, drive), record=idx)[:, 1:]
         else:
@@ -108,20 +181,47 @@ class BrainDenoiser(torch.nn.Module):
             h = torch.cat(outs, 1)
         return h[:, a.warm + a.lag:a.warm + a.lag + T]                       # (B, T, K)
 
+    def readout(self, h):
+        w = self.w_out + (self.w_train if getattr(self.a, "train_readout", False) else 0)
+        return (h @ w + self.b_out - self.mu0) / self.sd0
+
     def forward(self, y):
-        return (self.states(y) @ self.w_out + self.b_out - self.mu0) / self.sd0   # (B, T)
+        a = self.a
+        if getattr(a, "bidir", False):          # same fly brain run forward and on the time-reversed signal: past AND future context
+            if torch.is_tensor(y): yy = torch.cat([y, torch.flip(y, dims=[1])], 0)
+            else: yy = np.concatenate([y, y[:, ::-1]], 0)
+            hh = self.states(yy); B = y.shape[0]                 # one batched unroll for both directions
+            h = 0.5 * (hh[:B] + torch.flip(hh[B:], dims=[1]))
+        else:
+            h = self.states(y)
+        out = self.readout(h)
+        if getattr(a, "out_affine", False) or getattr(a, "residual", False):
+            out = self.out_scale * out + self.out_bias
+        if getattr(a, "residual", False):       # brain estimates the ARTIFACT: clean = noisy - brain output
+            out = (y.to(out.device, out.dtype) if torch.is_tensor(y) else torch.as_tensor(y, device=out.device, dtype=out.dtype)) - out
+        return out   # (B, T)
 
     def brain_params(self):
         ps = [self.model.alpha_logit, self.model.bias, self.in_gain]
         if self.a.train_edges: ps.append(self.model.log_gain)
         if isinstance(self.model, BrainPlus): ps += self.model.plus_params()
+        if getattr(self.a, "out_affine", False) or getattr(self.a, "residual", False): ps += [self.out_scale, self.out_bias]
+        if getattr(self.a, "train_readout", False): ps += [self.w_train]
+        if isinstance(self.model, BrainRewire): ps += self.model.rewire_params()
         return ps
 
 
 @torch.no_grad()
 def predict(bd, y, batch):
-    bd.eval()
-    return np.concatenate([bd(y[b:b + batch]).float().cpu().numpy() for b in range(0, len(y), batch)])
+    bd.eval(); K = max(1, getattr(bd.a, "unroll", 1))
+    out = []
+    for b in range(0, len(y), batch):
+        yk = torch.as_tensor(y[b:b + batch], device=bd.w_out.device)
+        for _ in range(K):                      # same K-step cleaning as in training
+            sc = yk.std(1, keepdim=True) + 1e-6
+            yk = bd(yk / sc) * sc
+        out.append(yk.float().cpu().numpy())
+    return np.concatenate(out)
 
 
 @torch.no_grad()
@@ -164,7 +264,7 @@ def shuffled_connectome(conn):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--artifact", default="eog", choices=["eog", "emg", "both"])
+    p.add_argument("--artifact", default="eog", choices=["eog", "emg", "both", "ecg", "line"])
     p.add_argument("--protocol", default="whole", choices=["whole", "centered"])
     p.add_argument("--n-train", type=int, default=4000); p.add_argument("--n-test", type=int, default=500)
     p.add_argument("--extra-train", type=int, default=0); p.add_argument("--aug", type=int, default=1)
@@ -190,11 +290,25 @@ def main():
     p.add_argument("--rho", type=float, default=0.9); p.add_argument("--alpha-min", type=float, default=0.02); p.add_argument("--alpha-max", type=float, default=0.5)
     p.add_argument("--gain", type=float, default=1.0); p.add_argument("--bias", type=float, default=0.02); p.add_argument("--h-max", type=float, default=10.0)
     p.add_argument("--jo-delays", type=int, default=0, help="JO delay-line encoding: neuron i gets the input delayed by i mod (D+1) samples (0 = plain half-wave drive)")
+    p.add_argument("--jo-span", type=int, default=0, help="with --jo-delays D: spread the D+1 delay taps geometrically over 0..SPAN samples (zero-filled), e.g. 256 = 1 s for delta waves")
     p.add_argument("--lag", type=int, default=24); p.add_argument("--warm", type=int, default=64)
     p.add_argument("--syn", action="store_true", help="BrainPlus: per-neuron synaptic filter (second-order neurons)")
     p.add_argument("--adapt", action="store_true", help="BrainPlus: per-neuron spike-frequency adaptation")
     p.add_argument("--adapt-g", type=float, default=0.3, help="initial adaptation strength")
     p.add_argument("--slope", action="store_true", help="BrainPlus: per-neuron learnable transfer slope")
+    p.add_argument("--filterbank", type=int, default=0, help="K log-spaced 1-80 Hz bands feeding interleaved JO groups (with --jo-delays: band x delay)")
+    p.add_argument("--bidir", action="store_true", help="run the fly brain forward and time-reversed, average the states (full-window context)")
+    p.add_argument("--residual", action="store_true", help="brain estimates the artifact; output = noisy - brain (learned scale/offset)")
+    p.add_argument("--out-affine", action="store_true", help="learnable output scale + offset on the fixed readout")
+    p.add_argument("--train-readout", action="store_true", help="make the linear readout over the wire neurons trainable (added to the fixed one)")
+    p.add_argument("--spec-loss", type=float, default=0.0, help="weight of the spectral (|FFT|) loss term")
+    p.add_argument("--cc-loss", type=float, default=0.0, help="weight of the (1 - CC) loss term")
+    p.add_argument("--snr-lo", type=float, default=-7.0, help="training/val SNR range low end (test stays -7..2)")
+    p.add_argument("--snr-hi", type=float, default=2.0, help="training/val SNR range high end")
+    p.add_argument("--unroll", type=int, default=1, help="diffusion-style K-step cleaning during training (loss on every step)")
+    p.add_argument("--new-edges", type=int, default=0, help="add N trainable synapses (half JO->readout, half random central), zero-init, free sign")
+    p.add_argument("--free-signs", action="store_true", help="let every existing synapse flip excitatory/inhibitory")
+    p.add_argument("--envelope", action="store_true", help="burst cue: a quarter of JO neurons get the >30 Hz amplitude envelope")
     p.add_argument("--no-ref-ridge", action="store_true", help="skip the untrained-brain ridge reference (random readout mode)")
     p.add_argument("--no-fir", action="store_true")
     p.add_argument("--out", type=Path, required=True); p.add_argument("--seed", type=int, default=0)
@@ -229,6 +343,9 @@ def main():
     dn_idx = torch.as_tensor(np.flatnonzero(ne.super_class.isin(["descending_neuron"]).to_numpy() | (ne.flow == "efferent").to_numpy()))
     out_idx = dn_idx if a.wire == "dn" else torch.as_tensor(np.flatnonzero(~is_jo))
     model = make_model(conn, a, a.device)
+    if a.new_edges > 0 or a.free_signs:
+        model.__class__ = BrainRewire; model.init_rewire(a, in_idx.to(a.device), out_idx.to(a.device))
+        print(f"BrainRewire: +{a.new_edges} trainable synapses, free signs={a.free_signs}", flush=True)
     if a.syn or a.adapt or a.slope:
         model.__class__ = BrainPlus; model.init_plus(a); print(f"BrainPlus neuron tweaks: {model.plus}", flush=True)
     if a.wire == "fastdn":                                   # readout only from the fastest DN/motor neurons (short time constants -> sharper output)
@@ -256,6 +373,9 @@ def main():
               {"params": [bd.model.bias], "lr": a.lr if a.lr_bias is None else a.lr_bias}]
     if isinstance(bd.model, BrainPlus): groups.append({"params": bd.model.plus_params(), "lr": a.lr})
     if a.train_edges: groups.append({"params": [bd.model.log_gain], "lr": a.lr_edge, "weight_decay": a.wd})
+    if a.out_affine or a.residual: groups.append({"params": [bd.out_scale, bd.out_bias], "lr": a.lr})
+    if a.train_readout: groups.append({"params": [bd.w_train], "lr": a.lr * 0.1})
+    if isinstance(bd.model, BrainRewire): groups.append({"params": bd.model.rewire_params(), "lr": a.lr_edge})
     opt = torch.optim.Adam(groups)
     steps_per_pass = -(-len(x["tr"]) // a.batch)
     total = a.passes * steps_per_pass
@@ -287,9 +407,19 @@ def main():
         if sched is not None and "sched" in c: sched.load_state_dict(c["sched"])
         print(f"resumed from pass {start} (best val gain {best['val_gain']:+.2f} dB @ pass {best['pass'] + 1})", flush=True)
     n, g = len(x["tr"]), torch.Generator().manual_seed(a.seed)
+    mid, cm = a.out / "ckpt_mid.pt", None          # mid-pass checkpoint: 1 h debug lanes are shorter than one slow pass
+    if mid.exists():
+        cm = torch.load(mid, map_location=a.device, weights_only=False)
+        if cm["pass"] != start: cm = None
+        else:
+            bd.load_state_dict(cm["state"], strict=False); opt.load_state_dict(cm["opt"])
+            if sched is not None and "sched" in cm: sched.load_state_dict(cm["sched"])
+            print(f"resumed mid-pass: pass {start + 1} step {cm['k']}", flush=True)
     for ps in range(start, a.passes):
         bd.train(); perm, tot, t0, k = torch.randperm(n, generator=g).numpy(), 0.0, time.time(), 0
-        for i0 in range(0, n, a.batch):
+        if cm is not None and ps == cm["pass"]:
+            perm, tot, k = cm["perm"], cm["tot"], cm["k"]; g.set_state(cm["g"].cpu()); t0 = time.time() - cm["sec"]
+        for i0 in range(k * a.batch, n, a.batch):
             i = np.sort(perm[i0:i0 + a.batch]); yb, xb = y["tr"][i], x["tr"][i]
             if a.train_len and a.train_len < yb.shape[1]:            # random crop (same offset for the batch): ~T/train_len x faster per step
                 s0 = int(g.integers(0, yb.shape[1] - a.train_len + 1)) if hasattr(g, "integers") else int(torch.randint(0, yb.shape[1] - a.train_len + 1, (1,), generator=g))
@@ -298,11 +428,33 @@ def main():
             mb = a.micro_batch if a.micro_batch and a.micro_batch < len(i) else len(i)   # gradient accumulation: same optimizer steps, less GPU memory
             xt, loss = torch.as_tensor(xb, device=a.device), 0.0
             for c0 in range(0, len(i), mb):
-                lc = ((bd(yb[c0:c0 + mb]) - xt[c0:c0 + mb]) ** 2).sum() / xt.numel(); lc.backward(); loss = loss + lc.detach()
+                xc = xt[c0:c0 + mb]
+                if a.unroll > 1:   # diffusion-style: clean in K steps, loss on every step (deep supervision), renormalising between steps
+                    yk = torch.as_tensor(yb[c0:c0 + mb], device=a.device); lsteps = 0
+                    for k in range(a.unroll):
+                        sc = yk.detach().std(1, keepdim=True) + 1e-6
+                        yk = bd(yk / sc) * sc
+                        lsteps = lsteps + ((yk - xc) ** 2).sum() / xt.numel()
+                    pr = yk; lc_extra = lsteps / a.unroll
+                else:
+                    pr, lc_extra = bd(yb[c0:c0 + mb]), None
+                lc = ((pr - xc) ** 2).sum() / xt.numel() if lc_extra is None else lc_extra
+                if a.spec_loss > 0:   # spectral term (RRMSE_s-like, on |FFT|)
+                    P, X = torch.fft.rfft(pr, dim=1).abs(), torch.fft.rfft(xc, dim=1).abs()
+                    lc = lc + a.spec_loss * (((P - X) ** 2).mean(1) / ((X ** 2).mean(1) + 1e-6)).sum() / len(xt)
+                if a.cc_loss > 0:     # 1 - correlation with the clean EEG
+                    pc, xcc = pr - pr.mean(1, keepdim=True), xc - xc.mean(1, keepdim=True)
+                    cc = (pc * xcc).sum(1) / (pc.norm(dim=1) * xcc.norm(dim=1) + 1e-6)
+                    lc = lc + a.cc_loss * (1 - cc).sum() / len(xt)
+                lc.backward(); loss = loss + lc.detach()
             gn = torch.nn.utils.clip_grad_norm_(params, a.clip).item(); opt.step()
             if sched is not None: sched.step()
             tot += loss.item() * len(i); k += 1
             if k % 10 == 1: print(f"  pass {ps + 1} step {k}/{-(-n // a.batch)} loss {loss.item():.4f} gradnorm {gn:.3g} {(time.time() - t0) / k:.2f}s/step", flush=True)
+            if k % 50 == 0:
+                torch.save({"state": bd.state_dict(), "opt": opt.state_dict(), "pass": ps, "k": k, "tot": tot, "perm": perm, "g": g.get_state(),
+                            "sec": time.time() - t0, **({"sched": sched.state_dict()} if sched is not None else {})}, str(mid) + ".tmp")
+                os.replace(str(mid) + ".tmp", mid)
             if k % 25 == 0 and (a.out / "STOP").exists(): break               # early stop requested by the trend watcher
         xv = predict(bd, y["va"], a.eval_batch); mv = metrics(xv, x["va"], y["va"])
         al = bd.model.alpha().detach(); gain = bd.model.log_gain.exp()
@@ -318,6 +470,7 @@ def main():
         torch.save({"state": bd.state_dict(), "opt": opt.state_dict(), "pass": ps, "hist": hist, "best": best,
                     **({"sched": sched.state_dict()} if sched is not None else {})}, ck)
         json.dump(hist, open(a.out / "history.json", "w"), indent=1)
+        if mid.exists(): mid.unlink()
         if ps - best["pass"] >= a.patience: print("early stop", flush=True); break
         if (a.out / "STOP").exists(): print(f"STOP file: ending after pass {ps + 1} ({(a.out / 'STOP').read_text().strip()})", flush=True); break
 
@@ -336,7 +489,8 @@ def main():
     np.savez(a.out / "results.npz", clean=x["te"], noisy=y["te"], **{f"xhat_{k}": v for k, v in xh.items()},
              **{f"{m}_{k}": v for m, r in res.items() for k, v in r.items()})
     torch.save({k_: v for k_, v in bd.state_dict().items() if k_ in ("model.alpha_logit", "model.bias", "model.log_gain", "in_gain", "w_out", "b_out", "mu0", "sd0",
-                                                                "model.syn_logit", "model.adapt_logit", "model.adapt_log_g", "model.log_slope")}, a.out / "brain_params.pt")
+                                                                "model.syn_logit", "model.adapt_logit", "model.adapt_log_g", "model.log_slope",
+                                                                "out_scale", "out_bias", "w_train", "model.w_new", "model.sg", "model.pre", "model.post")}, a.out / "brain_params.pt")
     print("saved", a.out / "summary.json", flush=True)
 
 

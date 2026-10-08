@@ -9,7 +9,7 @@ for L in brain/*/train_*.log logs/fly-brain-9271509.log; do [ -f "$L" ] || conti
 for L in logs/fly-lane-*.log; do [ -f "$L" ] || continue; j=$(basename $L .log); grep -E "\[lane\] (===|done|FAILED)|taking over|requeueing" "$L" | while read -r line; do report "$j" "$line"; done; done
 [ -n "${NO_SUBMIT:-}" ] && exit 0
 n_norm=$(squeue -u $USER -h -n fly-lane -o "%q" | grep -vc debug); n_dbg=$(squeue -u $USER -h -o "%q" | grep -c debug)
-if [ "$n_dbg" -eq 0 ]; then j=$(sbatch --parsable --qos=debug -p milan --gpus-per-node=a100:1 --time=02:00:00 fly-eeg/nesi_fly_lanes_v2.sl 2>&1) && echo "[keeper] submitted debug lane $j"; fi
+if [ "$n_dbg" -eq 0 ] && [ ! -f /nesi/nobackup/aut04653/Manj/Fly/.no_debug ]; then j=$(sbatch --parsable --qos=debug -p milan --gpus-per-node=a100:1 --time=01:00:00 fly-eeg/nesi_fly_lanes_v2.sl 2>&1) && echo "[keeper] submitted debug lane $j"; fi
 # spread pending lanes over every big GPU type (whichever frees first runs); L4 lanes capped at 2 (3x slower per step)
 TYPES=("milan a100" "genoa h100" "genoa pro_6000" "genoa l4"); k=0
 while [ "$n_norm" -lt "${NORMAL_TARGET:-4}" ]; do read PART TYPE <<< "${TYPES[$((k % 4))]}"; k=$((k+1))

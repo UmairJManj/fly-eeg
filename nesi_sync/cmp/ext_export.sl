@@ -1,0 +1,9 @@
+#!/bin/bash -e
+#SBATCH --job-name=fly-extexport
+#SBATCH --account=aut04653
+#SBATCH --time=01:00:00
+#SBATCH --mem=32G
+#SBATCH --cpus-per-task=8
+#SBATCH --partition=milan
+#SBATCH --output=/nesi/project/aut04653/Manj/Fly/logs/fly-extexport-%j.log
+/nesi/project/aut04653/Manj/Fly/cmp/.venv/bin/python /nesi/project/aut04653/Manj/Fly/cmp/ext_export.py
