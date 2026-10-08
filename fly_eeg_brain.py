@@ -211,7 +211,6 @@ class BrainDenoiser(torch.nn.Module):
         return ps
 
 
-@torch.no_grad()
 def feedback_mask(model, in_idx):
     """True for every edge whose target sits in an earlier layer than its source (layer = hop distance from the JO input)."""
     pre, post = model.pre.cpu().numpy(), model.post.cpu().numpy(); d = np.full(model.alpha().numel(), -1); d[in_idx.cpu().numpy()] = 0; l = 0
@@ -230,6 +229,7 @@ def cut_feedback(bd):
     with torch.no_grad(): bd.model.log_gain[bd.fb_mask] = -1e4
 
 
+@torch.no_grad()
 def predict(bd, y, batch):
     bd.eval(); K = max(1, getattr(bd.a, "unroll", 1))
     out = []
