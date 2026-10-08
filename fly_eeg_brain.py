@@ -212,6 +212,24 @@ class BrainDenoiser(torch.nn.Module):
 
 
 @torch.no_grad()
+def feedback_mask(model, in_idx):
+    """True for every edge whose target sits in an earlier layer than its source (layer = hop distance from the JO input)."""
+    pre, post = model.pre.cpu().numpy(), model.post.cpu().numpy(); d = np.full(model.alpha().numel(), -1); d[in_idx.cpu().numpy()] = 0; l = 0
+    while True:
+        nxt = np.unique(post[d[pre] == l]); nxt = nxt[d[nxt] < 0]
+        if len(nxt) == 0: break
+        l += 1; d[nxt] = l
+    return torch.as_tensor((d[pre] >= 0) & (d[post] >= 0) & (d[post] < d[pre]))
+
+
+def cut_feedback(bd):
+    """Zero the feedback synapses (log_gain -> -1e4, exp = 0); called at init, after resume and after every optimizer step."""
+    if not hasattr(bd, "fb_mask"):
+        bd.fb_mask = feedback_mask(bd.model, bd.in_idx).to(bd.model.log_gain.device)
+        print(f"cut-feedback: {int(bd.fb_mask.sum()):,} of {bd.fb_mask.numel():,} synapses removed ({bd.fb_mask.float().mean().item():.1%})", flush=True)
+    with torch.no_grad(): bd.model.log_gain[bd.fb_mask] = -1e4
+
+
 def predict(bd, y, batch):
     bd.eval(); K = max(1, getattr(bd.a, "unroll", 1))
     out = []
@@ -309,6 +327,7 @@ def main():
     p.add_argument("--new-edges", type=int, default=0, help="add N trainable synapses (half JO->readout, half random central), zero-init, free sign")
     p.add_argument("--free-signs", action="store_true", help="let every existing synapse flip excitatory/inhibitory")
     p.add_argument("--envelope", action="store_true", help="burst cue: a quarter of JO neurons get the >30 Hz amplitude envelope")
+    p.add_argument("--cut-feedback", action="store_true", help="remove every synapse that points back to an earlier layer (layer = hop distance from the JO input), kept at zero during training")
     p.add_argument("--no-ref-ridge", action="store_true", help="skip the untrained-brain ridge reference (random readout mode)")
     p.add_argument("--no-fir", action="store_true")
     p.add_argument("--out", type=Path, required=True); p.add_argument("--seed", type=int, default=0)
@@ -355,6 +374,7 @@ def main():
     for q in model.parameters(): q.requires_grad_(False)
     bd = BrainDenoiser(model, in_idx, out_idx, a).to(a.device)
     bd.register_buffer("dn_idx", dn_idx.to(a.device))
+    if a.cut_feedback: cut_feedback(bd)
     ref = set_fixed_readout(bd, x, y, a, rng)
     if ref: xh["r0"], res["r0"] = ref["r0"]
     elif not a.no_ref_ridge:
@@ -390,6 +410,7 @@ def main():
     if ck.exists():
         c = torch.load(ck, map_location=a.device, weights_only=False)
         bd.load_state_dict(c["state"], strict=False)                      # strict=False: older ckpts lack dn_idx
+        if a.cut_feedback: cut_feedback(bd)
         try:
             opt.load_state_dict(c["opt"])
         except ValueError:                                                 # older ckpts: 2 groups [alpha,bias,in_gain],[log_gain] -> now 3 groups [alpha,in_gain],[bias],[log_gain]
@@ -448,6 +469,7 @@ def main():
                     lc = lc + a.cc_loss * (1 - cc).sum() / len(xt)
                 lc.backward(); loss = loss + lc.detach()
             gn = torch.nn.utils.clip_grad_norm_(params, a.clip).item(); opt.step()
+            if a.cut_feedback: cut_feedback(bd)
             if sched is not None: sched.step()
             tot += loss.item() * len(i); k += 1
             if k % 10 == 1: print(f"  pass {ps + 1} step {k}/{-(-n // a.batch)} loss {loss.item():.4f} gradnorm {gn:.3g} {(time.time() - t0) / k:.2f}s/step", flush=True)
