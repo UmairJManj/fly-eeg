@@ -330,6 +330,7 @@ def main():
     p.add_argument("--cut-feedback", action="store_true", help="remove every synapse that points back to an earlier layer (layer = hop distance from the JO input), kept at zero during training")
     p.add_argument("--no-ref-ridge", action="store_true", help="skip the untrained-brain ridge reference (random readout mode)")
     p.add_argument("--no-fir", action="store_true")
+    p.add_argument("--val-max", type=int, default=0, help="validate each pass on a fixed random subset of this many val epochs")
     p.add_argument("--init", type=Path, default=None, help="warm start from a brain_params.pt (same architecture flags)")
     p.add_argument("--eval-only", action="store_true", help="with --init: evaluate the loaded brain on the test set and exit")
     p.add_argument("--out", type=Path, required=True); p.add_argument("--seed", type=int, default=0)
@@ -344,6 +345,8 @@ def main():
         if a.n_test: x["te"], y["te"] = x["te"][: a.n_test], y["te"][: a.n_test]
     else:
         x, y, snr = load_data(a, np.random.default_rng(0))
+    if a.val_max and len(x["va"]) > a.val_max:                         # cheaper per-pass validation (fixed subset, test set untouched)
+        vi = np.random.default_rng(1).choice(len(x["va"]), a.val_max, replace=False); x["va"], y["va"] = x["va"][vi], y["va"][vi]
     snr0 = snr["te"] if snr else None; a.snr0 = snr0   # centered protocol: nominal input SNR per test epoch (SPAR-EEG score)
     print(f"EEGdenoiseNet {a.artifact} ({a.protocol}): train {len(x['tr'])} val {len(x['va'])} test {len(x['te'])} epochs of {x['tr'].shape[1]} samples", flush=True)
     res, xh = {"noisy": metrics(y["te"], x["te"], y["te"], snr0)}, {}
