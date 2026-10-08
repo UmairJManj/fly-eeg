@@ -364,6 +364,7 @@ def main():
     p.add_argument("--cut-feedback", action="store_true", help="remove every synapse that points back to an earlier layer (layer = hop distance from the JO input), kept at zero during training")
     p.add_argument("--no-ref-ridge", action="store_true", help="skip the untrained-brain ridge reference (random readout mode)")
     p.add_argument("--no-fir", action="store_true")
+    p.add_argument("--pre-brain", default=None, help="cascade: run directory of a frozen brain whose output is this brain's input")
     p.add_argument("--multirate", type=int, default=0, help="K>1: add the same brain run on the K x downsampled signal (slow, delta-band context) through its own zero-initialised output scale")
     p.add_argument("--erp-aug", type=float, default=0.0, help="fraction of training epochs that get a random ERP-like transient in BOTH clean and noisy")
     p.add_argument("--erp-amax", type=float, default=1.2, help="largest ERP component amplitude (x clean std) for --erp-aug")
@@ -385,6 +386,15 @@ def main():
     if a.val_max and len(x["va"]) > a.val_max:                         # cheaper per-pass validation (fixed subset, test set untouched)
         vi = np.random.default_rng(1).choice(len(x["va"]), a.val_max, replace=False); x["va"], y["va"] = x["va"][vi], y["va"][vi]
     snr0 = snr["te"] if snr else None; a.snr0 = snr0   # centered protocol: nominal input SNR per test epoch (SPAR-EEG score)
+    y_raw_te = y["te"]
+    if a.pre_brain:   # cascade: a frozen first brain cleans every split once (cached); THIS brain learns to clean its output further
+        cache = Path(a.pre_brain) / f"pre_cache_{a.artifact}_aug{a.aug}_n{a.n_train}_{a.n_test}_{a.artifact_split}.npz"
+        if cache.exists(): z = np.load(cache); y = {k: z[k] for k in ("tr", "va", "te")}
+        else:
+            from fly_brain_apply import load_brain as _lb
+            pb = _lb(a.pre_brain, a.device); y = {k: predict(pb, v, a.eval_batch).astype(np.float32) for k, v in y.items()}
+            np.savez(cache, **y); del pb; torch.cuda.empty_cache()
+        print(f"cascade input = output of frozen brain {a.pre_brain}", flush=True)
     print(f"EEGdenoiseNet {a.artifact} ({a.protocol}): train {len(x['tr'])} val {len(x['va'])} test {len(x['te'])} epochs of {x['tr'].shape[1]} samples", flush=True)
     res, xh = {"noisy": metrics(y["te"], x["te"], y["te"], snr0)}, {}
     print(f"{'noisy input':30s} test {fmt(res['noisy'])}", flush=True)
@@ -552,6 +562,9 @@ def main():
     xh["brain"] = predict(bd, y["te"], a.eval_batch); res["brain"] = metrics(xh["brain"], x["te"], y["te"], snr0)
     name = "TRAINED brain + fixed readout" + (" (shuffled)" if a.shuffle else "")
     print(f"{name:30s} test {fmt(res['brain'])}   (best pass {best['pass'] + 1}, {time.time() - T0:.0f}s)", flush=True)
+    if a.pre_brain:   # report every row against the ORIGINAL noisy input (SNR gain), not the first brain's output
+        res = {k: metrics(v if k != "noisy" else y_raw_te, x["te"], y_raw_te, snr0) for k, v in [("noisy", None)] + list(xh.items())}
+        print(f"{'cascade (vs raw noisy)':30s} test {fmt(res['brain'])}   first stage alone {fmt(res['untrained'])}", flush=True)
     for other in ("untrained", "r0", "fir"):
         if other in res: paired(res, "brain", other)
     summary = {k: {m: float(v.mean()) for m, v in r.items()} for k, r in res.items()}
