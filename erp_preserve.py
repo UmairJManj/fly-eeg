@@ -28,11 +28,17 @@ def main():
     p = argparse.ArgumentParser(); p.add_argument("--brain", required=True); p.add_argument("--out", type=Path, required=True)
     p.add_argument("--amps", type=float, nargs="+", default=[0.25, 0.5, 1.0], help="P3 peak in units of the clean-epoch std")
     p.add_argument("--batch", type=int, default=50); p.add_argument("--device", default="cuda")
+    p.add_argument("--ckpt", default=None, help="override weights with a training checkpoint's state (ckpt.pt / ckpt_mid.pt)")
+    p.add_argument("--n-test", type=int, default=0, help="use only the first N test epochs (quick check)")
     a = p.parse_args(); a.out.mkdir(parents=True, exist_ok=True)
     bd = load_brain(a.brain, a.device); S = bd.a
+    if a.ckpt:
+        st = torch.load(a.ckpt, map_location=a.device, weights_only=False)["state"]; bd.load_state_dict(st, strict=False); bd.eval()
+        print(f"weights from checkpoint {a.ckpt}", flush=True)
     da = argparse.Namespace(artifact=S.artifact, protocol="whole", n_train=S.n_train, n_test=S.n_test, extra_train=0, aug=S.aug,
                             artifact_split=S.artifact_split, snr_lo=-7.0, snr_hi=2.0)
     x, y, _ = fd.load_data(da, np.random.default_rng(0)); xc, yn = x["te"], y["te"]
+    if a.n_test: xc, yn = xc[:a.n_test], yn[:a.n_test]
     base = predict(bd, yn, a.batch); res = {}
     for amp in a.amps:
         e = erp_template(amp)[None] * xc.std(1, keepdims=True)    # ERP scaled per epoch to that epoch's clean EEG
