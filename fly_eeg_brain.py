@@ -70,6 +70,39 @@ class BrainPlus(ConnectomeRNN):
         return torch.stack(hist, dim=1)
 
 
+class BrainDivNorm(ConnectomeRNN):
+    """--divnorm: shunting (divisive) inhibition. Each neuron's rectified drive is divided by its inhibitory input:
+         x_i = relu(W h + u + b)_i / (1 + k_i * I_i),   I_i = -(W_inh h)_i >= 0 (inhibitory synapses only)
+    Wiring, signs and the subtractive pathway are unchanged; k_i >= 0 is learnable per neuron and starts at 0, so the
+    model starts exactly as the subtractive brain it is initialised from. Gives amplitude-dependent gain control."""
+    def init_div(self):
+        self.div_k = torch.nn.Parameter(torch.zeros(self.n, device=self.w0.device))
+        self.register_buffer("inh_mask", (self.sign < 0).float())
+
+    def _prod(self, h, w, slot):
+        from nfly.brain import rnn as R
+        if R._USE_CSR and h.is_cuda:
+            S = R._csr_index(self); c = getattr(self, "_csr_w_" + slot, None)
+            if c is None or c[0] is not w:
+                c = (w, w[S["perm_f"]], w.detach()[S["perm_b"]]); setattr(self, "_csr_w_" + slot, c)
+            return R._CSRRecurrent.apply(h, c[1], c[2], S, self.n)
+        return R._SparseRecurrent.apply(h, w, self.pre, self.post, self.edge_chunk)
+
+    def forward(self, drive=None, steps=None, batch=1, h0=None, record=None):
+        steps, batch = drive.steps, drive.batch; dev = self.w0.device
+        h = torch.zeros(batch, self.n, device=dev) if h0 is None else h0.to(dev)
+        W = self.weights(); w_inh = W.w * self.inh_mask; k = self.div_k; idx = drive.idx.to(dev)
+        hist = [h if record is None else h[:, record]]
+        for t in range(steps):
+            u = torch.zeros(batch, self.n, device=dev); u[:, idx] = drive.drive[:, t].to(dev)
+            x = self.act(self._prod(h, W.w, "f") + u + self.bias)
+            x = x / (1 + k * (-self._prod(h, w_inh, "i")).clamp(min=0))
+            if self.h_max is not None: x = x.clamp(max=self.h_max)
+            h = (1 - W.alpha) * h + W.alpha * x
+            hist.append(h if record is None else h[:, record])
+        return torch.stack(hist, dim=1)
+
+
 class BrainRewire(ConnectomeRNN):
     """The fly connectome as the STARTING wiring, opened up: (1) `--new-edges N` trainable synapses added (half from the
     Johnston's-organ input neurons straight to the readout neurons, half between random central neurons), starting at
@@ -226,6 +259,7 @@ class BrainDenoiser(torch.nn.Module):
         ps = [self.model.alpha_logit, self.model.bias, self.in_gain]
         if self.a.train_edges: ps.append(self.model.log_gain)
         if isinstance(self.model, BrainPlus): ps += self.model.plus_params()
+        if isinstance(self.model, BrainDivNorm): ps += [self.model.div_k]
         if getattr(self.a, "out_affine", False) or getattr(self.a, "residual", False): ps += [self.out_scale, self.out_bias]
         if getattr(self.a, "multirate", 0) > 1: ps += [self.out_scale2, self.out_bias2]
         if getattr(self.a, "train_readout", False): ps += [self.w_train]
@@ -364,6 +398,8 @@ def main():
     p.add_argument("--cut-feedback", action="store_true", help="remove every synapse that points back to an earlier layer (layer = hop distance from the JO input), kept at zero during training")
     p.add_argument("--no-ref-ridge", action="store_true", help="skip the untrained-brain ridge reference (random readout mode)")
     p.add_argument("--no-fir", action="store_true")
+    p.add_argument("--divnorm", action="store_true", help="shunting inhibition: rectified drive divided by (1 + k_i * inhibitory input), k_i learnable, init 0")
+    p.add_argument("--lr-div", type=float, default=1e-2, help="learning rate of the per-neuron divisive gains k_i")
     p.add_argument("--pre-brain", default=None, help="cascade: run directory of a frozen brain whose output is this brain's input")
     p.add_argument("--multirate", type=int, default=0, help="K>1: add the same brain run on the K x downsampled signal (slow, delta-band context) through its own zero-initialised output scale")
     p.add_argument("--erp-aug", type=float, default=0.0, help="fraction of training epochs that get a random ERP-like transient in BOTH clean and noisy")
@@ -419,6 +455,8 @@ def main():
         print(f"BrainRewire: +{a.new_edges} trainable synapses, free signs={a.free_signs}", flush=True)
     if a.syn or a.adapt or a.slope:
         model.__class__ = BrainPlus; model.init_plus(a); print(f"BrainPlus neuron tweaks: {model.plus}", flush=True)
+    if getattr(a, "divnorm", False):
+        model.__class__ = BrainDivNorm; model.init_div(); print("BrainDivNorm: shunting inhibition, k_i init 0", flush=True)
     if a.wire == "fastdn":                                   # readout only from the fastest DN/motor neurons (short time constants -> sharper output)
         al = model.alpha().detach().cpu()[dn_idx]; out_idx = dn_idx[torch.argsort(al, descending=True)[: len(dn_idx) // 2]]
     print(f"{conn.summary()}\ninput: {len(in_idx)} JO neurons; fixed readout wire over {len(out_idx)} neurons ({a.wire}); ridge reference on {len(dn_idx)} DN/motor neurons", flush=True)
@@ -450,6 +488,7 @@ def main():
     groups = [{"params": [bd.model.alpha_logit, bd.in_gain], "lr": a.lr},
               {"params": [bd.model.bias], "lr": a.lr if a.lr_bias is None else a.lr_bias}]
     if isinstance(bd.model, BrainPlus): groups.append({"params": bd.model.plus_params(), "lr": a.lr})
+    if isinstance(bd.model, BrainDivNorm): groups.append({"params": [bd.model.div_k], "lr": a.lr_div})
     if a.train_edges: groups.append({"params": [bd.model.log_gain], "lr": a.lr_edge, "weight_decay": a.wd})
     if a.out_affine or a.residual: groups.append({"params": [bd.out_scale, bd.out_bias], "lr": a.lr})
     if a.multirate > 1: groups.append({"params": [bd.out_scale2, bd.out_bias2], "lr": a.lr})
@@ -531,6 +570,7 @@ def main():
                     lc = lc + a.cc_loss * (1 - cc).sum() / len(xt)
                 lc.backward(); loss = loss + lc.detach()
             gn = torch.nn.utils.clip_grad_norm_(params, a.clip).item(); opt.step()
+            if isinstance(bd.model, BrainDivNorm): bd.model.div_k.data.clamp_(min=0)     # k >= 0 (projected)
             if a.cut_feedback: cut_feedback(bd)
             if sched is not None: sched.step()
             tot += loss.item() * len(i); k += 1
@@ -576,7 +616,7 @@ def main():
     np.savez(a.out / "results.npz", clean=x["te"], noisy=y["te"], **{f"xhat_{k}": v for k, v in xh.items()},
              **{f"{m}_{k}": v for m, r in res.items() for k, v in r.items()})
     torch.save({k_: v for k_, v in bd.state_dict().items() if k_ in ("model.alpha_logit", "model.bias", "model.log_gain", "in_gain", "w_out", "b_out", "mu0", "sd0",
-                                                                "model.syn_logit", "model.adapt_logit", "model.adapt_log_g", "model.log_slope",
+                                                                "model.syn_logit", "model.div_k", "model.adapt_logit", "model.adapt_log_g", "model.log_slope",
                                                                 "out_scale", "out_bias", "out_scale2", "out_bias2", "w_train", "model.w_new", "model.sg", "model.pre", "model.post")}, a.out / "brain_params.pt")
     print("saved", a.out / "summary.json", flush=True)
 
