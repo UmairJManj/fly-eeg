@@ -29,7 +29,7 @@ def load_brain(run_dir, dev):
         model.__class__ = BrainRewire; model.init_rewire(a, in_idx.to(dev), torch.as_tensor(dn_idx if a.wire == "dn" else np.flatnonzero(~is_jo)).to(dev))
     if getattr(a, "divnorm", False):
         from fly_eeg_brain import BrainDivNorm
-        model.__class__ = BrainDivNorm; model.init_div()
+        model.__class__ = BrainDivNorm; model.init_div(getattr(a, "div_scale", 1.0))
     if a.wire == "fastdn":
         al = model.alpha().detach().cpu()[dn_idx]; out_idx = dn_idx[torch.argsort(al, descending=True)[: len(dn_idx) // 2]]
     else: out_idx = dn_idx if a.wire == "dn" else torch.as_tensor(np.flatnonzero(~is_jo))

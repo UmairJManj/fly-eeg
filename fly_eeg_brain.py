@@ -75,7 +75,10 @@ class BrainDivNorm(ConnectomeRNN):
          x_i = relu(W h + u + b)_i / (1 + k_i * I_i),   I_i = -(W_inh h)_i >= 0 (inhibitory synapses only)
     Wiring, signs and the subtractive pathway are unchanged; k_i >= 0 is learnable per neuron and starts at 0, so the
     model starts exactly as the subtractive brain it is initialised from. Gives amplitude-dependent gain control."""
-    def init_div(self):
+    def init_div(self, scale=100.0):
+        # typical inhibitory input in a trained brain is ~0.01 (median), so k_i is learned in units of 1/(div_scale):
+        # k_i = 1 then divides a median neuron's drive by about 2
+        self.div_scale = float(scale)
         self.div_k = torch.nn.Parameter(torch.zeros(self.n, device=self.w0.device))
         self.register_buffer("inh_mask", (self.sign < 0).float())
 
@@ -91,7 +94,7 @@ class BrainDivNorm(ConnectomeRNN):
     def forward(self, drive=None, steps=None, batch=1, h0=None, record=None):
         steps, batch = drive.steps, drive.batch; dev = self.w0.device
         h = torch.zeros(batch, self.n, device=dev) if h0 is None else h0.to(dev)
-        W = self.weights(); w_inh = W.w * self.inh_mask; k = self.div_k; idx = drive.idx.to(dev)
+        W = self.weights(); w_inh = W.w * self.inh_mask; k = self.div_k * self.div_scale; idx = drive.idx.to(dev)
         hist = [h if record is None else h[:, record]]
         for t in range(steps):
             u = torch.zeros(batch, self.n, device=dev); u[:, idx] = drive.drive[:, t].to(dev)
@@ -399,6 +402,7 @@ def main():
     p.add_argument("--no-ref-ridge", action="store_true", help="skip the untrained-brain ridge reference (random readout mode)")
     p.add_argument("--no-fir", action="store_true")
     p.add_argument("--divnorm", action="store_true", help="shunting inhibition: rectified drive divided by (1 + k_i * inhibitory input), k_i learnable, init 0")
+    p.add_argument("--div-scale", type=float, default=100.0, help="--divnorm: inhibitory input is multiplied by this before k_i (typical input ~0.01)")
     p.add_argument("--lr-div", type=float, default=1e-2, help="learning rate of the per-neuron divisive gains k_i")
     p.add_argument("--pre-brain", default=None, help="cascade: run directory of a frozen brain whose output is this brain's input")
     p.add_argument("--multirate", type=int, default=0, help="K>1: add the same brain run on the K x downsampled signal (slow, delta-band context) through its own zero-initialised output scale")
@@ -456,7 +460,7 @@ def main():
     if a.syn or a.adapt or a.slope:
         model.__class__ = BrainPlus; model.init_plus(a); print(f"BrainPlus neuron tweaks: {model.plus}", flush=True)
     if getattr(a, "divnorm", False):
-        model.__class__ = BrainDivNorm; model.init_div(); print("BrainDivNorm: shunting inhibition, k_i init 0", flush=True)
+        model.__class__ = BrainDivNorm; model.init_div(a.div_scale); print(f"BrainDivNorm: shunting inhibition, k_i init 0, inhibitory input scaled x{a.div_scale}", flush=True)
     if a.wire == "fastdn":                                   # readout only from the fastest DN/motor neurons (short time constants -> sharper output)
         al = model.alpha().detach().cpu()[dn_idx]; out_idx = dn_idx[torch.argsort(al, descending=True)[: len(dn_idx) // 2]]
     print(f"{conn.summary()}\ninput: {len(in_idx)} JO neurons; fixed readout wire over {len(out_idx)} neurons ({a.wire}); ridge reference on {len(dn_idx)} DN/motor neurons", flush=True)
